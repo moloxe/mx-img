@@ -16,3 +16,9 @@ __pycache__/
 
 # Temporary scratch
 experiments/scratch/
+
+# Bun / Node
+node_modules/
+dist/
+*.tsbuildinfo
+
