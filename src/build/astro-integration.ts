@@ -1,9 +1,9 @@
-import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { cp, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { attachMxImgUpgradeHandler } from "../server/stream-server.ts";
-import { buildMxImgAssets } from "./builder.ts";
+import { buildMxImgAssets, transformHtmlForMxImg } from "./builder.ts";
 import { mxImgVitePlugin, type MxImgVitePluginOptions } from "./vite-plugin.ts";
 
 export interface MxImgAstroOptions extends MxImgVitePluginOptions {
@@ -88,12 +88,33 @@ export function mxImgAstroIntegration(options: MxImgAstroOptions = {}): AstroInt
         const subDir = options.mxImgSubDir ?? ".mx-img";
         const primaryMxImgDir = join(distRootDir, subDir);
 
-        await buildMxImgAssets({
+        const { manifest } = await buildMxImgAssets({
           rootDir,
           inputDir: options.assetsDir ?? "src/assets/images",
           outDir: primaryMxImgDir,
           umbralRadioCroma: options.umbralRadioCroma ?? 0.15,
         });
+
+        if (existsSync(buildOutPath)) {
+          const allBuiltFiles = await readdir(buildOutPath, { recursive: true });
+          for (const rel of allBuiltFiles) {
+            const relStr = String(rel);
+            if (relStr.endsWith(".html")) {
+              const htmlPath = join(buildOutPath, relStr);
+              const rawHtml = await readFile(htmlPath, "utf8");
+              if (rawHtml.includes("mx-img")) {
+                const { html: updatedHtml, replacedCount } = transformHtmlForMxImg(
+                  rawHtml,
+                  manifest,
+                  { outputTag: options.outputTag ?? "canvas" }
+                );
+                if (replacedCount > 0) {
+                  await writeFile(htmlPath, updatedHtml, "utf8");
+                }
+              }
+            }
+          }
+        }
 
         // En Astro hybrid/server `dir` suele apuntar a `dist/client/`; sincronizamos si difiere de `dist/`
         const targetClientMxImgDir = join(buildOutPath, subDir);

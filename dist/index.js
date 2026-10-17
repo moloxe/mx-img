@@ -2618,7 +2618,7 @@ function mxImgVitePlugin(options = {}) {
   };
 }
 // src/build/astro-integration.ts
-import { cp, mkdir as mkdir3, readFile as readFile4, writeFile as writeFile3 } from "fs/promises";
+import { cp, mkdir as mkdir3, readdir as readdir2, readFile as readFile4, writeFile as writeFile3 } from "fs/promises";
 import { existsSync as existsSync5 } from "fs";
 import { join as join5, resolve as resolve4 } from "path";
 import { fileURLToPath } from "url";
@@ -2663,12 +2663,28 @@ function mxImgAstroIntegration(options = {}) {
         const buildOutPath = dir ? fileURLToPath(dir) : distRootDir;
         const subDir = options.mxImgSubDir ?? ".mx-img";
         const primaryMxImgDir = join5(distRootDir, subDir);
-        await buildMxImgAssets({
+        const { manifest } = await buildMxImgAssets({
           rootDir,
           inputDir: options.assetsDir ?? "src/assets/images",
           outDir: primaryMxImgDir,
           umbralRadioCroma: options.umbralRadioCroma ?? 0.15
         });
+        if (existsSync5(buildOutPath)) {
+          const allBuiltFiles = await readdir2(buildOutPath, { recursive: true });
+          for (const rel of allBuiltFiles) {
+            const relStr = String(rel);
+            if (relStr.endsWith(".html")) {
+              const htmlPath = join5(buildOutPath, relStr);
+              const rawHtml = await readFile4(htmlPath, "utf8");
+              if (rawHtml.includes("mx-img")) {
+                const { html: updatedHtml, replacedCount } = transformHtmlForMxImg(rawHtml, manifest, { outputTag: options.outputTag ?? "canvas" });
+                if (replacedCount > 0) {
+                  await writeFile3(htmlPath, updatedHtml, "utf8");
+                }
+              }
+            }
+          }
+        }
         const targetClientMxImgDir = join5(buildOutPath, subDir);
         if (resolve4(targetClientMxImgDir) !== resolve4(primaryMxImgDir) && existsSync5(primaryMxImgDir)) {
           await mkdir3(targetClientMxImgDir, { recursive: true });
