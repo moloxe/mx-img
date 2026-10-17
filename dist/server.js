@@ -120,8 +120,9 @@ function decodeServerChunkFrame(raw) {
     embeddedHeader
   };
 }
-function toWebSocketUrl(streamUrl) {
-  const trimmed = streamUrl.trim();
+var DEFAULT_STREAM_URL = "/.mx-img/stream";
+function toWebSocketUrl(streamUrl = DEFAULT_STREAM_URL) {
+  const trimmed = (streamUrl || DEFAULT_STREAM_URL).trim();
   if (trimmed.startsWith("ws://") || trimmed.startsWith("wss://")) {
     return trimmed;
   }
@@ -131,9 +132,12 @@ function toWebSocketUrl(streamUrl) {
   if (trimmed.startsWith("http://")) {
     return `ws://${trimmed.slice("http://".length)}`;
   }
-  if (typeof window !== "undefined" && trimmed.startsWith("/")) {
-    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-    return `${proto}//${window.location.host}${trimmed}`;
+  if (trimmed.startsWith("/")) {
+    if (typeof window !== "undefined" && window.location?.host) {
+      const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+      return `${proto}//${window.location.host}${trimmed}`;
+    }
+    return `ws://localhost${trimmed}`;
   }
   return `ws://${trimmed}`;
 }
@@ -1082,6 +1086,7 @@ function createMxImgStreamServer(options = {}) {
 if (false) {}
 export {
   DEFAULT_CHUNK_SIZE_BYTES,
+  DEFAULT_STREAM_URL,
   FRAME_FLAG_COMPLETED,
   FRAME_FLAG_HAS_EMBEDDED_HEADER,
   createMxImgStreamServer,

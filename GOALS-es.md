@@ -46,12 +46,12 @@ Este servicio debe permitir iniciar streams, aceptar pausas, continuarlos, inici
 #### Cliente:
 
 Se debe crear una librería `src/client/lib/index.ts` que registre un Custom Element con el tag `mx-img`, quedaría: `<canvas is="mx-img" src="../some/path.jpeg"></canvas>` (soportando también `<mx-img src="../some/path.jpeg"></mx-img>`).
-El cliente debe importar las librerías para la configuración inicial y la ubicación del servidor:
+El cliente debe importar las librerías para la configuración inicial y la ubicación del servidor (por defecto `"/.mx-img/stream"`, mostrando una alerta si no llega a funcionar; el puerto `8080` es exclusivo para pruebas locales de este repositorio):
 
 ```ts
 import { init } from "mx-img/client";
 init({
-  streamUrl: "http://localhost:8080/.mx-img/stream",
+  streamUrl: "/.mx-img/stream",
 });
 ```
 

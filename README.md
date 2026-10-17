@@ -57,14 +57,13 @@ Run the Bun WebSocket streaming service pointing to the generated `/dist/.mx-img
 import { createMxImgStreamServer } from "mx-img/server";
 
 createMxImgStreamServer({
-  port: 8080,
   mxImgDir: "dist/.mx-img",
 });
 ```
 
 ### 3. Initialize Client & Render (`src/pages/index.astro`)
 
-Initialize the single WebSocket connection on the client and place `<mx-img>` (or `<canvas is="mx-img">`) in your markup:
+Initialize the single WebSocket connection on the client (`streamUrl` defaults to `"/.mx-img/stream"`, emitting a warning if unreachable) and place `<mx-img>` (or `<canvas is="mx-img">`) in your markup:
 
 ```astro
 ---
@@ -77,7 +76,7 @@ Initialize the single WebSocket connection on the client and place `<mx-img>` (o
       import { init } from "mx-img/client";
 
       init({
-        streamUrl: "http://localhost:8080/.mx-img/stream",
+        streamUrl: "/.mx-img/stream", // optional, defaults to "/.mx-img/stream"
       });
     </script>
   </body>

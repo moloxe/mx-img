@@ -30,7 +30,7 @@ describe("MxImg Fase 3: Lib Bundles (mx-img/client, mx-img/server, mx-img/build)
     }
   });
 
-  test("2. El bundle de cliente (dist/client.js) es autocontenido para navegador y libre de dependencias de servidor", async () => {
+  test("2. El bundle de cliente (dist/client.js) es autocontenido para navegador, usa '/.mx-img/stream' por defecto y no depende del servidor", async () => {
     const clientCode = await readFile(resolve(DIST_DIR, "client.js"), "utf8");
     expect(clientCode).not.toContain(`from "sharp"`);
     expect(clientCode).not.toContain(`from "node:fs"`);
@@ -39,6 +39,10 @@ describe("MxImg Fase 3: Lib Bundles (mx-img/client, mx-img/server, mx-img/build)
     expect(typeof clientMod.init).toBe("function");
     expect(typeof clientMod.MxImg).toBe("function");
     expect(typeof clientMod.registerMxImgElement).toBe("function");
+
+    // Verificar que init() sin argumentos asigna "/.mx-img/stream" por defecto
+    clientMod.connectionManager.configure();
+    expect(clientMod.connectionManager.getConfig()?.streamUrl).toBe("/.mx-img/stream");
   });
 
   test("3. Los bundles de servidor (dist/server.js) y build (dist/build.js) exportan las APIs para Bun y Astro/Vite", async () => {
@@ -46,6 +50,7 @@ describe("MxImg Fase 3: Lib Bundles (mx-img/client, mx-img/server, mx-img/build)
     expect(typeof serverMod.createMxImgStreamServer).toBe("function");
     expect(typeof serverMod.encodeServerChunkFrame).toBe("function");
     expect(typeof serverMod.decodeServerChunkFrame).toBe("function");
+    expect(serverMod.DEFAULT_STREAM_URL).toBe("/.mx-img/stream");
 
     const buildMod = await import(resolve(DIST_DIR, "build.js"));
     expect(typeof buildMod.mxImgAstroIntegration).toBe("function");
@@ -66,6 +71,8 @@ describe("MxImg Fase 3: Lib Bundles (mx-img/client, mx-img/server, mx-img/build)
     expect(readme).toContain("mx-img/build");
     expect(readme).toContain("mx-img/server");
     expect(readme).toContain("mx-img/client");
+    expect(readme).toContain("/.mx-img/stream");
+    expect(readme).not.toContain("8080");
     expect(readme).toContain("Disclaimer");
 
     const license = await readFile(resolve(ROOT_DIR, "LICENSE"), "utf8");

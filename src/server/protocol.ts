@@ -169,11 +169,14 @@ export function decodeServerChunkFrame(raw: ArrayBuffer | Uint8Array): MxImgServ
   };
 }
 
+/** Ruta por defecto del servicio de streaming */
+export const DEFAULT_STREAM_URL = "/.mx-img/stream";
+
 /**
- * Convierte una URL `http://` o `https://` a `ws://` o `wss://` para la conexión WebSocket.
+ * Convierte una URL relativa (`"/.mx-img/stream"`), `http://` o `https://` a `ws://` o `wss://` para la conexión WebSocket.
  */
-export function toWebSocketUrl(streamUrl: string): string {
-  const trimmed = streamUrl.trim();
+export function toWebSocketUrl(streamUrl: string = DEFAULT_STREAM_URL): string {
+  const trimmed = (streamUrl || DEFAULT_STREAM_URL).trim();
   if (trimmed.startsWith("ws://") || trimmed.startsWith("wss://")) {
     return trimmed;
   }
@@ -183,9 +186,12 @@ export function toWebSocketUrl(streamUrl: string): string {
   if (trimmed.startsWith("http://")) {
     return `ws://${trimmed.slice("http://".length)}`;
   }
-  if (typeof window !== "undefined" && trimmed.startsWith("/")) {
-    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-    return `${proto}//${window.location.host}${trimmed}`;
+  if (trimmed.startsWith("/")) {
+    if (typeof window !== "undefined" && window.location?.host) {
+      const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+      return `${proto}//${window.location.host}${trimmed}`;
+    }
+    return `ws://localhost${trimmed}`;
   }
   return `ws://${trimmed}`;
 }

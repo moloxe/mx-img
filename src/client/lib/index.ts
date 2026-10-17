@@ -1,5 +1,6 @@
 import {
   DEFAULT_CHUNK_SIZE_BYTES,
+  DEFAULT_STREAM_URL,
   decodeServerChunkFrame,
   type MxImgClientCommand,
   type MxImgServerChunkFrame,
@@ -10,8 +11,8 @@ import { ProgressiveFourierDecoder } from "../../utils/encoding/decoder.ts";
 export type MxImgLifecycleState = "sleeping" | "active" | "paused" | "completed" | "error";
 
 export interface MxImgInitOptions {
-  /** URL del servicio de streaming (ej. `"http://localhost:8080/.mx-img/stream"` o `"ws://..."`) */
-  streamUrl: string;
+  /** Ruta o URL del servicio de streaming (por defecto `"/.mx-img/stream"`) */
+  streamUrl?: string;
   /** Margen del IntersectionObserver (por defecto `"0px"`) */
   rootMargin?: string;
   /** Umbral de visibilidad (0..1) para considerar visible al elemento (por defecto `0.05`) */
@@ -42,7 +43,7 @@ export interface MxImgProgressDetail {
  * todas las imágenes `<canvas is="mx-img">` visibles del documento.
  */
 class StreamConnectionManager {
-  private config: MxImgInitOptions | null = null;
+  private config: (Required<Pick<MxImgInitOptions, "streamUrl">> & MxImgInitOptions) | null = null;
   private ws: WebSocket | null = null;
   private isConnecting = false;
   private pendingCommands: MxImgClientCommand[] = [];
@@ -51,18 +52,20 @@ class StreamConnectionManager {
   private mutationObserver: MutationObserver | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
-  public configure(options: MxImgInitOptions): void {
+  public configure(options: MxImgInitOptions = {}): void {
     const prevUrl = this.config?.streamUrl;
+    const resolvedStreamUrl = options.streamUrl ?? DEFAULT_STREAM_URL;
     this.config = {
       rootMargin: "0px",
       threshold: 0.05,
       chunkSize: DEFAULT_CHUNK_SIZE_BYTES,
       ...options,
+      streamUrl: resolvedStreamUrl,
     };
 
     this.setupIntersectionObserver();
     this.setupDomUpgrader();
-    this.ensureConnected(prevUrl !== options.streamUrl);
+    this.ensureConnected(prevUrl !== undefined && prevUrl !== resolvedStreamUrl);
 
     // Observar cualquier <canvas is="mx-img"> que ya estuviera en el DOM antes de init()
     if (typeof document !== "undefined") {
@@ -75,7 +78,7 @@ class StreamConnectionManager {
     }
   }
 
-  public getConfig(): MxImgInitOptions | null {
+  public getConfig(): (Required<Pick<MxImgInitOptions, "streamUrl">> & MxImgInitOptions) | null {
     return this.config;
   }
 
@@ -163,6 +166,10 @@ class StreamConnectionManager {
 
     socket.addEventListener("error", () => {
       this.isConnecting = false;
+      console.warn(
+        `[mx-img] Could not connect to stream endpoint "${wsUrl}" (configured streamUrl: "${this.config?.streamUrl}"). Verify that the mx-img stream server is reachable or pass a custom "streamUrl" in init({ streamUrl }).`
+      );
+      this.dispatchConnectionEvent("error", wsUrl);
     });
   }
 
@@ -316,7 +323,10 @@ class StreamConnectionManager {
     }
   }
 
-  private dispatchConnectionEvent(status: "connected" | "disconnected", url: string): void {
+  private dispatchConnectionEvent(
+    status: "connected" | "disconnected" | "error",
+    url: string
+  ): void {
     if (typeof window !== "undefined" && typeof CustomEvent !== "undefined") {
       window.dispatchEvent(
         new CustomEvent("mx-img:connection", {
@@ -762,9 +772,9 @@ export function registerMxImgElement(): void {
 
 /**
  * Inicializa la librería cliente `mx-img` con la URL del servidor de streaming
- * y abre el único puerto/conexión WebSocket para servir los canvas visibles.
+ * (por defecto `"/.mx-img/stream"`) y abre la única conexión WebSocket para servir los canvas visibles.
  */
-export function init(options: MxImgInitOptions): void {
+export function init(options: MxImgInitOptions = {}): void {
   registerMxImgElement();
   connectionManager.configure(options);
 }

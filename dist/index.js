@@ -926,8 +926,9 @@ function decodeServerChunkFrame(raw) {
     embeddedHeader
   };
 }
-function toWebSocketUrl(streamUrl) {
-  const trimmed = streamUrl.trim();
+var DEFAULT_STREAM_URL = "/.mx-img/stream";
+function toWebSocketUrl(streamUrl = DEFAULT_STREAM_URL) {
+  const trimmed = (streamUrl || DEFAULT_STREAM_URL).trim();
   if (trimmed.startsWith("ws://") || trimmed.startsWith("wss://")) {
     return trimmed;
   }
@@ -937,9 +938,12 @@ function toWebSocketUrl(streamUrl) {
   if (trimmed.startsWith("http://")) {
     return `ws://${trimmed.slice("http://".length)}`;
   }
-  if (typeof window !== "undefined" && trimmed.startsWith("/")) {
-    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-    return `${proto}//${window.location.host}${trimmed}`;
+  if (trimmed.startsWith("/")) {
+    if (typeof window !== "undefined" && window.location?.host) {
+      const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+      return `${proto}//${window.location.host}${trimmed}`;
+    }
+    return `ws://localhost${trimmed}`;
   }
   return `ws://${trimmed}`;
 }
@@ -954,17 +958,19 @@ class StreamConnectionManager {
   intersectionObserver = null;
   mutationObserver = null;
   reconnectTimer = null;
-  configure(options) {
+  configure(options = {}) {
     const prevUrl = this.config?.streamUrl;
+    const resolvedStreamUrl = options.streamUrl ?? DEFAULT_STREAM_URL;
     this.config = {
       rootMargin: "0px",
       threshold: 0.05,
       chunkSize: DEFAULT_CHUNK_SIZE_BYTES,
-      ...options
+      ...options,
+      streamUrl: resolvedStreamUrl
     };
     this.setupIntersectionObserver();
     this.setupDomUpgrader();
-    this.ensureConnected(prevUrl !== options.streamUrl);
+    this.ensureConnected(prevUrl !== undefined && prevUrl !== resolvedStreamUrl);
     if (typeof document !== "undefined") {
       const existingCanvases = document.querySelectorAll('canvas[is="mx-img"]');
       for (const el of existingCanvases) {
@@ -1044,6 +1050,8 @@ class StreamConnectionManager {
     });
     socket.addEventListener("error", () => {
       this.isConnecting = false;
+      console.warn(`[mx-img] Could not connect to stream endpoint "${wsUrl}" (configured streamUrl: "${this.config?.streamUrl}"). Verify that the mx-img stream server is reachable or pass a custom "streamUrl" in init({ streamUrl }).`);
+      this.dispatchConnectionEvent("error", wsUrl);
     });
   }
   sendCommand(cmd) {
@@ -1521,7 +1529,7 @@ function registerMxImgElement() {
     customElements.define("mx-img", MxImg, { extends: "canvas" });
   }
 }
-function init(options) {
+function init(options = {}) {
   registerMxImgElement();
   connectionManager.configure(options);
 }
@@ -2241,6 +2249,7 @@ function mxImgAstroIntegration(options = {}) {
 export {
   BYTES_PER_COEFFICIENT,
   DEFAULT_CHUNK_SIZE_BYTES,
+  DEFAULT_STREAM_URL,
   FRAME_FLAG_COMPLETED,
   FRAME_FLAG_HAS_EMBEDDED_HEADER,
   HEADER_BYTE_LENGTH,

@@ -1,8 +1,8 @@
 import { type MxImgClientCommand, type MxImgServerChunkFrame } from "../../server/protocol.ts";
 export type MxImgLifecycleState = "sleeping" | "active" | "paused" | "completed" | "error";
 export interface MxImgInitOptions {
-    /** URL del servicio de streaming (ej. `"http://localhost:8080/.mx-img/stream"` o `"ws://..."`) */
-    streamUrl: string;
+    /** Ruta o URL del servicio de streaming (por defecto `"/.mx-img/stream"`) */
+    streamUrl?: string;
     /** Margen del IntersectionObserver (por defecto `"0px"`) */
     rootMargin?: string;
     /** Umbral de visibilidad (0..1) para considerar visible al elemento (por defecto `0.05`) */
@@ -39,8 +39,8 @@ declare class StreamConnectionManager {
     private intersectionObserver;
     private mutationObserver;
     private reconnectTimer;
-    configure(options: MxImgInitOptions): void;
-    getConfig(): MxImgInitOptions | null;
+    configure(options?: MxImgInitOptions): void;
+    getConfig(): (Required<Pick<MxImgInitOptions, "streamUrl">> & MxImgInitOptions) | null;
     isConnected(): boolean;
     ensureConnected(forceReconnect?: boolean): void;
     sendCommand(cmd: MxImgClientCommand): void;
@@ -131,7 +131,7 @@ export declare class MxImg extends BaseCanvasClass {
 export declare function registerMxImgElement(): void;
 /**
  * Inicializa la librería cliente `mx-img` con la URL del servidor de streaming
- * y abre el único puerto/conexión WebSocket para servir los canvas visibles.
+ * (por defecto `"/.mx-img/stream"`) y abre la única conexión WebSocket para servir los canvas visibles.
  */
-export declare function init(options: MxImgInitOptions): void;
+export declare function init(options?: MxImgInitOptions): void;
 export {};

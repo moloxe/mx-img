@@ -68,7 +68,9 @@ export declare function encodeServerChunkFrame(frame: MxImgServerChunkFrame): Ui
  * Desempaqueta un frame binario recibido por WebSocket en un `MxImgServerChunkFrame`.
  */
 export declare function decodeServerChunkFrame(raw: ArrayBuffer | Uint8Array): MxImgServerChunkFrame;
+/** Ruta por defecto del servicio de streaming */
+export declare const DEFAULT_STREAM_URL = "/.mx-img/stream";
 /**
- * Convierte una URL `http://` o `https://` a `ws://` o `wss://` para la conexión WebSocket.
+ * Convierte una URL relativa (`"/.mx-img/stream"`), `http://` o `https://` a `ws://` o `wss://` para la conexión WebSocket.
  */
-export declare function toWebSocketUrl(streamUrl: string): string;
+export declare function toWebSocketUrl(streamUrl?: string): string;
