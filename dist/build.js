@@ -747,8 +747,8 @@ async function buildMxImgAssets(options = {}) {
   } else {
     const inputDir = resolve(rootDir, options.inputDir ?? "src/assets/images");
     if (existsSync2(inputDir)) {
-      const dirItems = await readdir(inputDir);
-      targetFiles = dirItems.filter((name) => SUPPORTED_IMAGE_EXTENSIONS.has(extname(name).toLowerCase())).sort().map((name) => join2(inputDir, name));
+      const dirItems = await readdir(inputDir, { recursive: true });
+      targetFiles = dirItems.map((item) => String(item)).filter((name) => SUPPORTED_IMAGE_EXTENSIONS.has(extname(name).toLowerCase())).sort().map((name) => join2(inputDir, name));
     }
   }
   const entries = [];
@@ -766,11 +766,11 @@ async function buildMxImgAssets(options = {}) {
 function transformHtmlForMxImg(html, manifest, options = {}) {
   const outputTag = options.outputTag ?? "canvas";
   let replacedCount = 0;
-  const mxImgRegex = /<mx-img\b([^>]*?)(?:\/>|><\/mx-img>)/gi;
+  const mxImgRegex = /<mx-img\b([^>]*?)(?:\/>|>\s*<\/mx-img>)/gi;
   let result = html.replace(mxImgRegex, (fullMatch, attrsStr) => {
     const srcMatch = attrsStr.match(/\bsrc\s*=\s*["']([^"']+)["']/i);
     if (!srcMatch) {
-      if (/\bsrc\s*=\s*\{/i.test(attrsStr) && outputTag === "canvas") {
+      if (outputTag === "canvas") {
         replacedCount++;
         const hasIsAttr = /\bis\s*=\s*["']mx-img["']/i.test(attrsStr);
         const isAttr = hasIsAttr ? "" : ` is="mx-img"`;
@@ -801,7 +801,7 @@ function transformHtmlForMxImg(html, manifest, options = {}) {
     }
     return `<mx-img${updatedAttrs}></mx-img>`;
   });
-  const canvasMxRegex = /<canvas\b([^>]*?\bis\s*=\s*["']mx-img["'][^>]*?)><\/canvas>/gi;
+  const canvasMxRegex = /<canvas\b([^>]*?\bis\s*=\s*["']mx-img["'][^>]*?)>\s*<\/canvas>/gi;
   result = result.replace(canvasMxRegex, (fullMatch, attrsStr) => {
     const srcMatch = attrsStr.match(/\bsrc\s*=\s*["']([^"']+)["']/i);
     if (!srcMatch)
@@ -1456,8 +1456,10 @@ function mxImgAstroIntegration(options = {}) {
             plugins: [plugin]
           }
         });
-        if (options.streamUrl && injectScript) {
-          injectScript("page", `import { init } from "mx-img/client"; init({ streamUrl: ${JSON.stringify(options.streamUrl)} });`);
+        if (injectScript) {
+          const initArg = options.streamUrl ? `{ streamUrl: ${JSON.stringify(options.streamUrl)} }` : "";
+          injectScript("before-hydration", `import { registerMxImgElement } from "mx-img/client"; registerMxImgElement();`);
+          injectScript("page", `import { init } from "mx-img/client"; init(${initArg}); document.addEventListener("astro:page-load", () => init(${initArg}));`);
         }
       },
       async "astro:server:setup"({ server }) {

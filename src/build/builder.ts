@@ -115,8 +115,9 @@ export async function buildMxImgAssets(options: BuildMxImgOptions = {}): Promise
   } else {
     const inputDir = resolve(rootDir, options.inputDir ?? "src/assets/images");
     if (existsSync(inputDir)) {
-      const dirItems = await readdir(inputDir);
+      const dirItems = await readdir(inputDir, { recursive: true });
       targetFiles = dirItems
+        .map((item) => String(item))
         .filter((name) => SUPPORTED_IMAGE_EXTENSIONS.has(extname(name).toLowerCase()))
         .sort()
         .map((name) => join(inputDir, name));
@@ -151,12 +152,11 @@ export function transformHtmlForMxImg(
   let replacedCount = 0;
 
   // 1. Transformar etiquetas <mx-img ...></mx-img> o <mx-img ... />
-  const mxImgRegex = /<mx-img\b([^>]*?)(?:\/>|><\/mx-img>)/gi;
+  const mxImgRegex = /<mx-img\b([^>]*?)(?:\/>|>\s*<\/mx-img>)/gi;
   let result = html.replace(mxImgRegex, (fullMatch, attrsStr: string) => {
     const srcMatch = attrsStr.match(/\bsrc\s*=\s*["']([^"']+)["']/i);
     if (!srcMatch) {
-      // Si `src={...}` es una expresión dinámica JSX/TSX, convertir igualmente a `<canvas is="mx-img">`
-      if (/\bsrc\s*=\s*\{/i.test(attrsStr) && outputTag === "canvas") {
+      if (outputTag === "canvas") {
         replacedCount++;
         const hasIsAttr = /\bis\s*=\s*["']mx-img["']/i.test(attrsStr);
         const isAttr = hasIsAttr ? "" : ` is="mx-img"`;
@@ -193,7 +193,7 @@ export function transformHtmlForMxImg(
   });
 
   // 2. Transformar etiquetas <canvas is="mx-img" src="..."></canvas> que aún no fueron transformadas
-  const canvasMxRegex = /<canvas\b([^>]*?\bis\s*=\s*["']mx-img["'][^>]*?)><\/canvas>/gi;
+  const canvasMxRegex = /<canvas\b([^>]*?\bis\s*=\s*["']mx-img["'][^>]*?)>\s*<\/canvas>/gi;
   result = result.replace(canvasMxRegex, (fullMatch, attrsStr: string) => {
     const srcMatch = attrsStr.match(/\bsrc\s*=\s*["']([^"']+)["']/i);
     if (!srcMatch) return fullMatch;

@@ -60,10 +60,17 @@ export function mxImgAstroIntegration(options: MxImgAstroOptions = {}): AstroInt
           },
         });
 
-        if (options.streamUrl && injectScript) {
+        if (injectScript) {
+          const initArg = options.streamUrl
+            ? `{ streamUrl: ${JSON.stringify(options.streamUrl)} }`
+            : "";
+          injectScript(
+            "before-hydration",
+            `import { registerMxImgElement } from "mx-img/client"; registerMxImgElement();`
+          );
           injectScript(
             "page",
-            `import { init } from "mx-img/client"; init({ streamUrl: ${JSON.stringify(options.streamUrl)} });`
+            `import { init } from "mx-img/client"; init(${initArg}); document.addEventListener("astro:page-load", () => init(${initArg}));`
           );
         }
       },
