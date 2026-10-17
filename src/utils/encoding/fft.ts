@@ -19,9 +19,24 @@ interface StockhamStage {
   kernelIm?: Float64Array;
 }
 
+interface BluesteinData {
+  mLen: number;
+  mPlan: FFT1DPlan;
+  chirpRe: Float64Array;
+  chirpIm: Float64Array;
+  /** conj(FFT(b)) / M precalculado */
+  kernelSpecRe: Float64Array;
+  kernelSpecIm: Float64Array;
+  bufRe: Float64Array;
+  bufIm: Float64Array;
+  bufScratchRe: Float64Array;
+  bufScratchIm: Float64Array;
+}
+
 interface FFT1DPlan {
   n: number;
   stages: StockhamStage[];
+  bluestein?: BluesteinData;
 }
 
 const planCache = new Map<number, FFT1DPlan>();
@@ -55,14 +70,76 @@ function factorize(n: number): number[] {
   return factors;
 }
 
+function nextPowerOfTwo(v: number): number {
+  let p = 1;
+  while (p < v) p <<= 1;
+  return p;
+}
+
 /**
- * Construye o recupera de caché el plan Mixed-Radix Stockham para longitud `n`.
+ * Construye o recupera de caché el plan Mixed-Radix Stockham (o Bluestein para primos > 13) para longitud `n`.
  */
 function getFFT1DPlan(n: number): FFT1DPlan {
   const cached = planCache.get(n);
   if (cached) return cached;
 
   const factors = factorize(n);
+  const maxFactor = factors.reduce((acc, v) => (v > acc ? v : acc), 1);
+
+  if (maxFactor > 13) {
+    const mLen = nextPowerOfTwo(2 * n - 1);
+    const mPlan = getFFT1DPlan(mLen);
+    const chirpRe = new Float64Array(n);
+    const chirpIm = new Float64Array(n);
+    const bRe = new Float64Array(mLen);
+    const bIm = new Float64Array(mLen);
+    const bScratchRe = new Float64Array(mLen);
+    const bScratchIm = new Float64Array(mLen);
+
+    const twoN = 2 * n;
+    for (let k = 0; k < n; k++) {
+      const rem = (k * k) % twoN;
+      const angle = (Math.PI * rem) / n;
+      const c = Math.cos(angle);
+      const s = Math.sin(angle);
+      chirpRe[k] = c;
+      chirpIm[k] = -s;
+      bRe[k] = c;
+      bIm[k] = s;
+      if (k > 0) {
+        bRe[mLen - k] = c;
+        bIm[mLen - k] = s;
+      }
+    }
+
+    executeFFT1DForward(bRe, bIm, bScratchRe, bScratchIm, mPlan);
+
+    const invM = 1.0 / mLen;
+    for (let i = 0; i < mLen; i++) {
+      bRe[i] = bRe[i] * invM;
+      bIm[i] = -bIm[i] * invM;
+    }
+
+    const plan: FFT1DPlan = {
+      n,
+      stages: [],
+      bluestein: {
+        mLen,
+        mPlan,
+        chirpRe,
+        chirpIm,
+        kernelSpecRe: bRe,
+        kernelSpecIm: bIm,
+        bufRe: new Float64Array(mLen),
+        bufIm: new Float64Array(mLen),
+        bufScratchRe: new Float64Array(mLen),
+        bufScratchIm: new Float64Array(mLen),
+      },
+    };
+    planCache.set(n, plan);
+    return plan;
+  }
+
   const stages: StockhamStage[] = [];
   let m = 1;
 
@@ -115,6 +192,56 @@ function executeFFT1DForward(
   scratchIm: Float64Array,
   plan: FFT1DPlan
 ): void {
+  if (plan.bluestein) {
+    const {
+      mLen,
+      mPlan,
+      chirpRe,
+      chirpIm,
+      kernelSpecRe,
+      kernelSpecIm,
+      bufRe,
+      bufIm,
+      bufScratchRe,
+      bufScratchIm,
+    } = plan.bluestein;
+    const n = plan.n;
+
+    for (let k = 0; k < n; k++) {
+      const xr = re[k];
+      const xi = im[k];
+      const wr = chirpRe[k];
+      const wi = chirpIm[k];
+      bufRe[k] = xr * wr - xi * wi;
+      bufIm[k] = xr * wi + xi * wr;
+    }
+    bufRe.fill(0, n, mLen);
+    bufIm.fill(0, n, mLen);
+
+    executeFFT1DForward(bufRe, bufIm, bufScratchRe, bufScratchIm, mPlan);
+
+    for (let i = 0; i < mLen; i++) {
+      const ar = bufRe[i];
+      const ai = -bufIm[i];
+      const br = kernelSpecRe[i];
+      const bi = kernelSpecIm[i];
+      bufRe[i] = ar * br - ai * bi;
+      bufIm[i] = ar * bi + ai * br;
+    }
+
+    executeFFT1DForward(bufRe, bufIm, bufScratchRe, bufScratchIm, mPlan);
+
+    for (let k = 0; k < n; k++) {
+      const cr = bufRe[k];
+      const ci = -bufIm[k];
+      const wr = chirpRe[k];
+      const wi = chirpIm[k];
+      re[k] = cr * wr - ci * wi;
+      im[k] = cr * wi + ci * wr;
+    }
+    return;
+  }
+
   let inRe = re;
   let inIm = im;
   let outRe = scratchRe;
@@ -212,7 +339,7 @@ function executeFFT1DForward(
         }
       }
     } else {
-      // Radix general (ej. 3, 5, 13) con kernel precalculado
+      // Radix general (ej. 3, 5, 7, 11, 13) con kernel precalculado
       const kRe = kernelRe!;
       const kIm = kernelIm!;
       const zRe = new Float64Array(radix);
