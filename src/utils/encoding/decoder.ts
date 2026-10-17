@@ -1,8 +1,12 @@
-import { resolve } from "node:path";
+import {
+  BYTES_PER_COEFFICIENT,
+  deserializeFourierStream,
+  HEADER_BYTE_LENGTH,
+  type MxImgHeader,
+  parseMxImgHeader,
+} from "./binary.ts";
 import { computePsnr, ycbcrToRgb } from "./color.ts";
-import { encodeImageFromFile } from "./encoder.ts";
 import { ifftshiftAndIfft2dReal } from "./fft.ts";
-import { deserializeFourierStream, saveImageRgb } from "./image-io.ts";
 import { calculateChromaLimit, generateRadialOrder } from "./radial-order.ts";
 import type {
   DecodedFourierColorResult,
@@ -177,9 +181,212 @@ export function decodeFourierColorProgressive(
 /** Alias compatible con la nomenclatura del notebook en Python */
 export const decode_fourier_color_progresivo = decodeFourierColorProgressive;
 
+/**
+ * Decodificador incremental de streams `.mximg` para el cliente (`<canvas is="mx-img">`).
+ *
+ * Acumula porciones binarias (`chunks`) en un buffer continuo del archivo `.mximg`,
+ * inyecta únicamente los nuevos coeficientes complejos recibidos en las matrices
+ * espectrales `espY`, `espCb` y `espCr`, y genera un buffer RGBA (`Uint8ClampedArray`)
+ * listo para `ImageData` en `<canvas>`.
+ */
+export class ProgressiveFourierDecoder {
+  private streamBuffer: Uint8Array | null = null;
+  private header: MxImgHeader | null = null;
+  private espY: Float64Array | null = null;
+  private espCb: Float64Array | null = null;
+  private espCr: Float64Array | null = null;
+  private ordenRadial: Int32Array | null = null;
+  private injectedCoefficients = 0;
+  private receivedBytes = 0;
+
+  /**
+   * Incorpora una porción de bytes en la posición `offsetBytes` del stream `.mximg`.
+   */
+  public appendChunk(chunk: Uint8Array, offsetBytes: number, totalBytes?: number): void {
+    const requiredEnd = offsetBytes + chunk.byteLength;
+
+    if (!this.streamBuffer) {
+      const initialCap = totalBytes && totalBytes >= requiredEnd ? totalBytes : requiredEnd;
+      this.streamBuffer = new Uint8Array(initialCap);
+    } else if (this.streamBuffer.byteLength < requiredEnd) {
+      const nextCap = Math.max(requiredEnd, totalBytes ?? 0);
+      const next = new Uint8Array(nextCap);
+      next.set(this.streamBuffer);
+      this.streamBuffer = next;
+    }
+
+    this.streamBuffer.set(chunk, offsetBytes);
+    if (requiredEnd > this.receivedBytes) {
+      this.receivedBytes = requiredEnd;
+    }
+
+    if (!this.header && this.receivedBytes >= HEADER_BYTE_LENGTH) {
+      this.header = parseMxImgHeader(this.streamBuffer);
+      const { height: h, width: w } = this.header;
+      const nPix = h * w;
+      const { ordenRadial } = generateRadialOrder(h, w);
+      this.ordenRadial = ordenRadial;
+      this.espY = new Float64Array(nPix * 2);
+      this.espCb = new Float64Array(nPix * 2);
+      this.espCr = new Float64Array(nPix * 2);
+
+      // DC neutro por defecto hasta que lleguen los primeros coeficientes de crominancia
+      this.espCb[ordenRadial[0] * 2] = 128.0 * nPix;
+      this.espCr[ordenRadial[0] * 2] = 128.0 * nPix;
+    }
+
+    this.injectPendingCoefficients();
+  }
+
+  public getHeader(): MxImgHeader | null {
+    return this.header;
+  }
+
+  public getReceivedBytes(): number {
+    return this.receivedBytes;
+  }
+
+  public getInjectedCoefficients(): number {
+    return this.injectedCoefficients;
+  }
+
+  /**
+   * Inyecta en `espY`, `espCb` y `espCr` todos los coeficientes completos
+   * recibidos desde `this.injectedCoefficients` hasta `availableCoeffs`.
+   */
+  private injectPendingCoefficients(): void {
+    if (
+      !this.header ||
+      !this.streamBuffer ||
+      !this.ordenRadial ||
+      !this.espY ||
+      !this.espCb ||
+      !this.espCr
+    ) {
+      return;
+    }
+
+    const availablePayloadBytes = Math.max(0, this.receivedBytes - HEADER_BYTE_LENGTH);
+    const availableCoeffs = Math.min(
+      this.header.numCoefficients,
+      Math.floor(availablePayloadBytes / BYTES_PER_COEFFICIENT)
+    );
+
+    if (availableCoeffs <= this.injectedCoefficients) {
+      return;
+    }
+
+    const view = new DataView(
+      this.streamBuffer.buffer,
+      this.streamBuffer.byteOffset + HEADER_BYTE_LENGTH,
+      availableCoeffs * BYTES_PER_COEFFICIENT
+    );
+
+    const kCroma = this.header.kCroma;
+    const limiteStreamCroma = 3 * kCroma;
+    const ordenRadial = this.ordenRadial;
+    const espY = this.espY;
+    const espCb = this.espCb;
+    const espCr = this.espCr;
+
+    for (let idx = this.injectedCoefficients; idx < availableCoeffs; idx++) {
+      const byteOff = idx * BYTES_PER_COEFFICIENT;
+      const re = view.getFloat64(byteOff, true);
+      const im = view.getFloat64(byteOff + 8, true);
+
+      if (idx < limiteStreamCroma) {
+        const kRad = Math.floor(idx / 3);
+        const channelMod = idx % 3;
+        const dstOffset = ordenRadial[kRad] * 2;
+        if (channelMod === 0) {
+          espY[dstOffset] = re;
+          espY[dstOffset + 1] = im;
+        } else if (channelMod === 1) {
+          espCb[dstOffset] = re;
+          espCb[dstOffset + 1] = im;
+        } else {
+          espCr[dstOffset] = re;
+          espCr[dstOffset + 1] = im;
+        }
+      } else {
+        const i = idx - limiteStreamCroma;
+        const radialIdx = kCroma + i;
+        if (radialIdx < ordenRadial.length) {
+          const dstOffset = ordenRadial[radialIdx] * 2;
+          espY[dstOffset] = re;
+          espY[dstOffset + 1] = im;
+        }
+      }
+    }
+
+    this.injectedCoefficients = availableCoeffs;
+  }
+
+  /**
+   * Ejecuta la 2D-IFFT sobre los espectros acumulados hasta el momento y devuelve
+   * un buffer RGBA (`Uint8ClampedArray`) listo para `ctx.putImageData()`.
+   */
+  public decodeToRgba(): {
+    rgba: Uint8ClampedArray;
+    width: number;
+    height: number;
+    coeficientesUsados: number;
+    totalCoefficients: number;
+    porcentajeCompletado: number;
+    porcentajeCromaCompletado: number;
+  } | null {
+    if (
+      !this.header ||
+      !this.espY ||
+      !this.espCb ||
+      !this.espCr ||
+      this.injectedCoefficients === 0
+    ) {
+      return null;
+    }
+
+    const { height: h, width: w, kCroma, numCoefficients } = this.header;
+    const nPix = h * w;
+
+    const yRec = ifftshiftAndIfft2dReal(this.espY, h, w);
+    const cbRec = ifftshiftAndIfft2dReal(this.espCb, h, w);
+    const crRec = ifftshiftAndIfft2dReal(this.espCr, h, w);
+
+    const rgba = new Uint8ClampedArray(nPix * 4);
+    for (let i = 0, p = 0; i < nPix; i++, p += 4) {
+      const yVal = yRec[i];
+      const cbShift = cbRec[i] - 128.0;
+      const crShift = crRec[i] - 128.0;
+
+      rgba[p] = Math.round(yVal + 1.402 * crShift);
+      rgba[p + 1] = Math.round(yVal - 0.344136 * cbShift - 0.714136 * crShift);
+      rgba[p + 2] = Math.round(yVal + 1.772 * cbShift);
+      rgba[p + 3] = 255;
+    }
+
+    const kCromaRecibidos = Math.min(kCroma, Math.floor(this.injectedCoefficients / 3));
+    const porcentajeCromaCompletado = (kCromaRecibidos / kCroma) * 100.0;
+    const porcentajeCompletado = (this.injectedCoefficients / numCoefficients) * 100.0;
+
+    return {
+      rgba,
+      width: w,
+      height: h,
+      coeficientesUsados: this.injectedCoefficients,
+      totalCoefficients: numCoefficients,
+      porcentajeCompletado,
+      porcentajeCromaCompletado,
+    };
+  }
+}
+
 // Ejecución directa como script desde CLI:
 // `bun src/utils/encoding/decoder.ts [inputPath] [porcentaje] [outputImgPath]`
 if (import.meta.main) {
+  const { resolve } = await import("node:path");
+  const { encodeImageFromFile } = await import("./encoder.ts");
+  const { saveImageRgb } = await import("./image-io.ts");
+
   const defaultImgPath = resolve(import.meta.dir, "../../assets/images/periodic-surface.jpeg");
   const inputPath = process.argv[2] ? resolve(process.argv[2]) : defaultImgPath;
   const pctArg = process.argv[3] ? Number.parseFloat(process.argv[3]) : undefined;
@@ -204,7 +411,6 @@ if (import.meta.main) {
   }
 
   const etapas = pctArg !== undefined ? [pctArg] : [0.1, 0.5, 2.0, 10.0, 50.0, 100.0];
-  const nStream = secuencia1D.length / 2;
 
   console.log("=".repeat(88));
   console.log("🧩 MX-IMG DECODER (Bun Runtime) - Reconstrucción Progresiva Multicanal");

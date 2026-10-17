@@ -1,4 +1,5 @@
 export * from "./types.ts";
+export * from "./binary.ts";
 export * from "./color.ts";
 export * from "./radial-order.ts";
 export * from "./fft.ts";

@@ -1,13 +1,22 @@
 {
   "name": "mx-img",
-  "version": "0.1.0",
-  "description": "Progressive Fourier spectrum image encoder and decoder (<mx-img />)",
+  "version": "0.2.0",
+  "description": "Progressive Fourier spectrum image encoder, decoder, and streaming custom element (<mx-img />)",
   "type": "module",
   "module": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./client": "./src/client/lib/index.ts",
+    "./server": "./src/server/index.ts",
+    "./build": "./src/build/index.ts"
+  },
   "scripts": {
     "test": "bun test",
     "encode": "bun run src/utils/encoding/encoder.ts",
     "decode": "bun run src/utils/encoding/decoder.ts",
+    "build:assets": "bun run src/build/builder.ts",
+    "server": "bun run src/server/stream-server.ts",
+    "mockup": "bun run src/client/mockup/static-server.ts",
     "typecheck": "bun x tsc --noEmit",
     "format": "prettier --write .",
     "format:check": "prettier --check ."

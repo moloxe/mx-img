@@ -1,0 +1,646 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MxImg &lt;mx-img /&gt; — Fase 2: Stream Progresivo de Fourier</title>
+    <style>
+      :root {
+        --bg: #0b0f17;
+        --panel: #131b2e;
+        --border: #23304d;
+        --text: #e2e8f0;
+        --muted: #94a3b8;
+        --accent: #38bdf8;
+        --sleeping: #64748b;
+        --active: #38bdf8;
+        --paused: #f59e0b;
+        --completed: #10b981;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        line-height: 1.5;
+      }
+
+      header.topbar {
+        position: sticky;
+        top: 0;
+        z-index: 100;
+        background: rgba(11, 15, 23, 0.92);
+        backdrop-filter: blur(12px);
+        border-bottom: 1px solid var(--border);
+        padding: 0.85rem 1.5rem;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1rem;
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+      }
+
+      .brand h1 {
+        font-size: 1.1rem;
+        margin: 0;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+      }
+
+      .brand code {
+        background: #1e293b;
+        color: var(--accent);
+        padding: 0.2rem 0.45rem;
+        border-radius: 6px;
+        font-size: 0.85rem;
+      }
+
+      .ws-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        font-size: 0.8rem;
+        padding: 0.25rem 0.65rem;
+        border-radius: 999px;
+        background: #1e293b;
+        border: 1px solid var(--border);
+      }
+
+      .ws-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--paused);
+      }
+
+      .ws-dot.connected {
+        background: var(--completed);
+        box-shadow: 0 0 8px var(--completed);
+      }
+
+      .telemetry-stats {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.75rem;
+        font-size: 0.82rem;
+      }
+
+      .stat-chip {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        padding: 0.3rem 0.65rem;
+        border-radius: 8px;
+        color: var(--muted);
+      }
+
+      .stat-chip strong {
+        color: var(--text);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .controls-bar {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-size: 0.82rem;
+      }
+
+      select,
+      button {
+        background: #1e293b;
+        color: var(--text);
+        border: 1px solid var(--border);
+        padding: 0.35rem 0.65rem;
+        border-radius: 6px;
+        font-size: 0.8rem;
+        cursor: pointer;
+      }
+
+      button:hover {
+        border-color: var(--accent);
+      }
+
+      main.container {
+        max-width: 960px;
+        margin: 0 auto;
+        padding: 2rem 1.25rem 6rem;
+        display: flex;
+        flex-direction: column;
+        gap: 3.5rem;
+      }
+
+      .intro-banner {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 1.1rem 1.35rem;
+        font-size: 0.9rem;
+        color: var(--muted);
+      }
+
+      .intro-banner strong {
+        color: var(--text);
+      }
+
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        overflow: hidden;
+        box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+      }
+
+      .card-header {
+        padding: 0.9rem 1.25rem;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.75rem;
+      }
+
+      .card-title {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        font-weight: 600;
+        font-size: 0.95rem;
+      }
+
+      .badge {
+        font-size: 0.74rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        padding: 0.2rem 0.55rem;
+        border-radius: 999px;
+      }
+
+      .badge[data-state="sleeping"] {
+        background: rgba(100, 116, 139, 0.2);
+        color: #cbd5e1;
+        border: 1px solid rgba(100, 116, 139, 0.4);
+      }
+      .badge[data-state="active"] {
+        background: rgba(56, 189, 248, 0.18);
+        color: #38bdf8;
+        border: 1px solid rgba(56, 189, 248, 0.5);
+      }
+      .badge[data-state="paused"] {
+        background: rgba(245, 158, 11, 0.18);
+        color: #fbbf24;
+        border: 1px solid rgba(245, 158, 11, 0.5);
+      }
+      .badge[data-state="completed"] {
+        background: rgba(16, 185, 129, 0.18);
+        color: #34d399;
+        border: 1px solid rgba(16, 185, 129, 0.5);
+      }
+
+      .canvas-viewport {
+        background: #05080f;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 380px;
+        padding: 1rem;
+      }
+
+      .canvas-viewport canvas {
+        max-width: 100%;
+        height: auto;
+        border-radius: 6px;
+        background: #0f172a;
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+      }
+
+      .card-footer {
+        padding: 0.9rem 1.25rem;
+        border-top: 1px solid var(--border);
+        display: flex;
+        flex-direction: column;
+        gap: 0.65rem;
+      }
+
+      .progress-track {
+        width: 100%;
+        height: 8px;
+        background: #0b0f17;
+        border-radius: 999px;
+        overflow: hidden;
+      }
+
+      .progress-fill {
+        height: 100%;
+        width: 0%;
+        background: linear-gradient(90deg, #38bdf8, #10b981);
+        transition: width 0.12s ease-out;
+      }
+
+      .card-metrics {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.5rem;
+        font-size: 0.8rem;
+        color: var(--muted);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .card-actions {
+        display: flex;
+        gap: 0.4rem;
+      }
+    </style>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <h1>MxImg</h1>
+        <code>&lt;mx-img /&gt;</code>
+        <div class="ws-pill">
+          <span id="ws-dot" class="ws-dot"></span>
+          <span id="ws-status">Conectando...</span>
+        </div>
+      </div>
+
+      <div class="telemetry-stats">
+        <div class="stat-chip">Dormidas: <strong id="count-sleeping">0</strong></div>
+        <div class="stat-chip">Activas: <strong id="count-active">0</strong></div>
+        <div class="stat-chip">Pausadas: <strong id="count-paused">0</strong></div>
+        <div class="stat-chip">Completadas: <strong id="count-completed">0</strong></div>
+        <div class="stat-chip">Chunks: <strong id="total-chunks">0</strong></div>
+      </div>
+
+      <div class="controls-bar">
+        <label for="throttle-select">Velocidad:</label>
+        <select id="throttle-select">
+          <option value="1">Turbo (1 ms/chunk)</option>
+          <option value="20" selected>Normal (20 ms/chunk)</option>
+          <option value="80">Cámara Lenta (80 ms/chunk)</option>
+          <option value="200">Paso a paso (200 ms/chunk)</option>
+        </select>
+      </div>
+    </header>
+
+    <main class="container">
+      <div class="intro-banner">
+        <strong
+          >Prueba local de Fase 2 (1 conexión WebSocket + Round-Robin Equitativo +
+          IntersectionObserver):</strong
+        >
+        Las imágenes visibles en el viewport solicitan porciones de <strong>100 KB</strong> de forma
+        equitativa. Las imágenes inferiores permanecen <strong>dormidas (0 KB)</strong> hasta que
+        haces scroll hacia ellas, y si dejas de ver una imagen a mitad de carga pasa automáticamente
+        a <strong>pausa</strong>.
+      </div>
+
+      <!-- Tarjetas para las 9 imágenes en src/assets/images -->
+      <section class="card" data-card-id="/assets/images/periodic-surface.jpeg">
+        <div class="card-header">
+          <div class="card-title">
+            <span>1. periodic-surface.jpeg</span>
+            <span class="badge" data-state="sleeping">Dormido</span>
+          </div>
+          <div class="card-actions">
+            <button type="button" data-action="pause">Pausar</button>
+            <button type="button" data-action="resume">Continuar</button>
+            <button type="button" data-action="offset25">Desfase 25%</button>
+          </div>
+        </div>
+        <div class="canvas-viewport">
+          <mx-img src="/assets/images/periodic-surface.jpeg" width="800" height="780"></mx-img>
+        </div>
+        <div class="card-footer">
+          <div class="progress-track"><div class="progress-fill"></div></div>
+          <div class="card-metrics">
+            <span data-metric="bytes">0 KB / 0 KB (0.0%)</span>
+            <span data-metric="coeffs">Coefs K: 0 | Croma: 0.0%</span>
+            <span data-metric="time">IFFT: 0.0 ms</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="card" data-card-id="/assets/images/mandelbulb.jpeg">
+        <div class="card-header">
+          <div class="card-title">
+            <span>2. mandelbulb.jpeg</span>
+            <span class="badge" data-state="sleeping">Dormido</span>
+          </div>
+          <div class="card-actions">
+            <button type="button" data-action="pause">Pausar</button>
+            <button type="button" data-action="resume">Continuar</button>
+            <button type="button" data-action="offset25">Desfase 25%</button>
+          </div>
+        </div>
+        <div class="canvas-viewport">
+          <mx-img src="/assets/images/mandelbulb.jpeg"></mx-img>
+        </div>
+        <div class="card-footer">
+          <div class="progress-track"><div class="progress-fill"></div></div>
+          <div class="card-metrics">
+            <span data-metric="bytes">0 KB / 0 KB (0.0%)</span>
+            <span data-metric="coeffs">Coefs K: 0 | Croma: 0.0%</span>
+            <span data-metric="time">IFFT: 0.0 ms</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="card" data-card-id="/assets/images/fractal.jpeg">
+        <div class="card-header">
+          <div class="card-title">
+            <span>3. fractal.jpeg</span>
+            <span class="badge" data-state="sleeping">Dormido</span>
+          </div>
+          <div class="card-actions">
+            <button type="button" data-action="pause">Pausar</button>
+            <button type="button" data-action="resume">Continuar</button>
+            <button type="button" data-action="offset25">Desfase 25%</button>
+          </div>
+        </div>
+        <div class="canvas-viewport">
+          <mx-img src="/assets/images/fractal.jpeg"></mx-img>
+        </div>
+        <div class="card-footer">
+          <div class="progress-track"><div class="progress-fill"></div></div>
+          <div class="card-metrics">
+            <span data-metric="bytes">0 KB / 0 KB (0.0%)</span>
+            <span data-metric="coeffs">Coefs K: 0 | Croma: 0.0%</span>
+            <span data-metric="time">IFFT: 0.0 ms</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="card" data-card-id="/assets/images/fractal-2.jpeg">
+        <div class="card-header">
+          <div class="card-title">
+            <span>4. fractal-2.jpeg</span>
+            <span class="badge" data-state="sleeping">Dormido</span>
+          </div>
+          <div class="card-actions">
+            <button type="button" data-action="pause">Pausar</button>
+            <button type="button" data-action="resume">Continuar</button>
+            <button type="button" data-action="offset25">Desfase 25%</button>
+          </div>
+        </div>
+        <div class="canvas-viewport">
+          <mx-img src="/assets/images/fractal-2.jpeg"></mx-img>
+        </div>
+        <div class="card-footer">
+          <div class="progress-track"><div class="progress-fill"></div></div>
+          <div class="card-metrics">
+            <span data-metric="bytes">0 KB / 0 KB (0.0%)</span>
+            <span data-metric="coeffs">Coefs K: 0 | Croma: 0.0%</span>
+            <span data-metric="time">IFFT: 0.0 ms</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="card" data-card-id="/assets/images/fractal-3.jpeg">
+        <div class="card-header">
+          <div class="card-title">
+            <span>5. fractal-3.jpeg</span>
+            <span class="badge" data-state="sleeping">Dormido</span>
+          </div>
+          <div class="card-actions">
+            <button type="button" data-action="pause">Pausar</button>
+            <button type="button" data-action="resume">Continuar</button>
+            <button type="button" data-action="offset25">Desfase 25%</button>
+          </div>
+        </div>
+        <div class="canvas-viewport">
+          <mx-img src="/assets/images/fractal-3.jpeg"></mx-img>
+        </div>
+        <div class="card-footer">
+          <div class="progress-track"><div class="progress-fill"></div></div>
+          <div class="card-metrics">
+            <span data-metric="bytes">0 KB / 0 KB (0.0%)</span>
+            <span data-metric="coeffs">Coefs K: 0 | Croma: 0.0%</span>
+            <span data-metric="time">IFFT: 0.0 ms</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="card" data-card-id="/assets/images/model.jpeg">
+        <div class="card-header">
+          <div class="card-title">
+            <span>6. model.jpeg</span>
+            <span class="badge" data-state="sleeping">Dormido</span>
+          </div>
+          <div class="card-actions">
+            <button type="button" data-action="pause">Pausar</button>
+            <button type="button" data-action="resume">Continuar</button>
+            <button type="button" data-action="offset25">Desfase 25%</button>
+          </div>
+        </div>
+        <div class="canvas-viewport">
+          <mx-img src="/assets/images/model.jpeg"></mx-img>
+        </div>
+        <div class="card-footer">
+          <div class="progress-track"><div class="progress-fill"></div></div>
+          <div class="card-metrics">
+            <span data-metric="bytes">0 KB / 0 KB (0.0%)</span>
+            <span data-metric="coeffs">Coefs K: 0 | Croma: 0.0%</span>
+            <span data-metric="time">IFFT: 0.0 ms</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="card" data-card-id="/assets/images/patterns.jpeg">
+        <div class="card-header">
+          <div class="card-title">
+            <span>7. patterns.jpeg</span>
+            <span class="badge" data-state="sleeping">Dormido</span>
+          </div>
+          <div class="card-actions">
+            <button type="button" data-action="pause">Pausar</button>
+            <button type="button" data-action="resume">Continuar</button>
+            <button type="button" data-action="offset25">Desfase 25%</button>
+          </div>
+        </div>
+        <div class="canvas-viewport">
+          <mx-img src="/assets/images/patterns.jpeg"></mx-img>
+        </div>
+        <div class="card-footer">
+          <div class="progress-track"><div class="progress-fill"></div></div>
+          <div class="card-metrics">
+            <span data-metric="bytes">0 KB / 0 KB (0.0%)</span>
+            <span data-metric="coeffs">Coefs K: 0 | Croma: 0.0%</span>
+            <span data-metric="time">IFFT: 0.0 ms</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="card" data-card-id="/assets/images/vectorn-field.jpeg">
+        <div class="card-header">
+          <div class="card-title">
+            <span>8. vectorn-field.jpeg</span>
+            <span class="badge" data-state="sleeping">Dormido</span>
+          </div>
+          <div class="card-actions">
+            <button type="button" data-action="pause">Pausar</button>
+            <button type="button" data-action="resume">Continuar</button>
+            <button type="button" data-action="offset25">Desfase 25%</button>
+          </div>
+        </div>
+        <div class="canvas-viewport">
+          <mx-img src="/assets/images/vectorn-field.jpeg"></mx-img>
+        </div>
+        <div class="card-footer">
+          <div class="progress-track"><div class="progress-fill"></div></div>
+          <div class="card-metrics">
+            <span data-metric="bytes">0 KB / 0 KB (0.0%)</span>
+            <span data-metric="coeffs">Coefs K: 0 | Croma: 0.0%</span>
+            <span data-metric="time">IFFT: 0.0 ms</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="card" data-card-id="/assets/images/voronoi.jpeg">
+        <div class="card-header">
+          <div class="card-title">
+            <span>9. voronoi.jpeg</span>
+            <span class="badge" data-state="sleeping">Dormido</span>
+          </div>
+          <div class="card-actions">
+            <button type="button" data-action="pause">Pausar</button>
+            <button type="button" data-action="resume">Continuar</button>
+            <button type="button" data-action="offset25">Desfase 25%</button>
+          </div>
+        </div>
+        <div class="canvas-viewport">
+          <mx-img src="/assets/images/voronoi.jpeg"></mx-img>
+        </div>
+        <div class="card-footer">
+          <div class="progress-track"><div class="progress-fill"></div></div>
+          <div class="card-metrics">
+            <span data-metric="bytes">0 KB / 0 KB (0.0%)</span>
+            <span data-metric="coeffs">Coefs K: 0 | Croma: 0.0%</span>
+            <span data-metric="time">IFFT: 0.0 ms</span>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script type="module">
+      import { init, connectionManager, MxImg } from "/lib/index.js";
+
+      const STATE_LABELS = {
+        sleeping: "Dormido",
+        active: "Activo (Streaming)",
+        paused: "En Pausa",
+        completed: "Completado",
+        error: "Error",
+      };
+
+      let totalChunksCount = 0;
+
+      function updateGlobalCounts() {
+        const canvases = document.querySelectorAll('canvas[is="mx-img"]');
+        const counts = { sleeping: 0, active: 0, paused: 0, completed: 0 };
+        for (const c of canvases) {
+          const st = c.getAttribute("data-mx-state") || "sleeping";
+          if (st in counts) counts[st]++;
+        }
+        document.getElementById("count-sleeping").textContent = String(counts.sleeping);
+        document.getElementById("count-active").textContent = String(counts.active);
+        document.getElementById("count-paused").textContent = String(counts.paused);
+        document.getElementById("count-completed").textContent = String(counts.completed);
+      }
+
+      window.addEventListener("mx-img:connection", (e) => {
+        const dot = document.getElementById("ws-dot");
+        const label = document.getElementById("ws-status");
+        if (e.detail.status === "connected") {
+          dot.classList.add("connected");
+          label.textContent = `1 Conexión Activa (${e.detail.url})`;
+        } else {
+          dot.classList.remove("connected");
+          label.textContent = "Reconectando...";
+        }
+      });
+
+      document.addEventListener("mx-img:state", (e) => {
+        const card = e.target.closest(".card");
+        if (card) {
+          const badge = card.querySelector(".badge");
+          const state = e.detail.state;
+          badge.setAttribute("data-state", state);
+          badge.textContent = STATE_LABELS[state] || state;
+        }
+        updateGlobalCounts();
+      });
+
+      document.addEventListener("mx-img:progress", (e) => {
+        totalChunksCount++;
+        document.getElementById("total-chunks").textContent = String(totalChunksCount);
+
+        const card = e.target.closest(".card");
+        if (!card) return;
+        const d = e.detail;
+
+        const fill = card.querySelector(".progress-fill");
+        fill.style.width = `${d.progressPercent.toFixed(1)}%`;
+
+        const recvKb = (d.receivedBytes / 1024).toFixed(0);
+        const totalKb = (d.targetBytes / 1024).toFixed(0);
+        card.querySelector('[data-metric="bytes"]').textContent =
+          `${recvKb} KB / ${totalKb} KB (${d.progressPercent.toFixed(1)}%)`;
+        card.querySelector('[data-metric="coeffs"]').textContent =
+          `Coefs K: ${d.coeficientesUsados.toLocaleString()} / ${d.totalCoefficients.toLocaleString()} | Croma: ${d.chromaPercent.toFixed(1)}%`;
+        card.querySelector('[data-metric="time"]').textContent =
+          `IFFT: ${d.decodeTimeMs.toFixed(1)} ms`;
+      });
+
+      // Inicializar la librería cliente apuntando al servicio en localhost:8080/.mx-img/stream
+      const streamUrl = `${window.location.origin}/.mx-img/stream`;
+      init({
+        streamUrl,
+        threshold: 0.1,
+      });
+
+      updateGlobalCounts();
+
+      // Controles manuales por tarjeta (Pausar, Continuar, Desfase 25%)
+      document.querySelectorAll(".card").forEach((card) => {
+        card.addEventListener("click", (ev) => {
+          const btn = ev.target.closest("button[data-action]");
+          if (!btn) return;
+          const canvas = card.querySelector('canvas[is="mx-img"]');
+          if (!(canvas instanceof MxImg)) return;
+
+          const action = btn.getAttribute("data-action");
+          if (action === "pause") {
+            canvas.pause();
+          } else if (action === "resume") {
+            canvas.startOrResume();
+          } else if (action === "offset25") {
+            const target = canvas.getTargetBytes() || 409600;
+            const alignedOffset = 32 + Math.floor((target * 0.25) / 16) * 16;
+            canvas.startOrResume(alignedOffset);
+          }
+        });
+      });
+
+      // Selector de velocidad de envío del servidor
+      document.getElementById("throttle-select").addEventListener("change", (ev) => {
+        const delayMs = Number.parseInt(ev.target.value, 10);
+        connectionManager.sendCommand({ type: "throttle", delayMs });
+      });
+    </script>
+  </body>
+</html>
