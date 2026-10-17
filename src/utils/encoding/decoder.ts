@@ -68,9 +68,7 @@ export function decodeFourierColorProgressive(
   optionsOrUmbral: number | DecodeProgressiveOptions = 0.15
 ): DecodedFourierColorResult {
   const opts: DecodeProgressiveOptions =
-    typeof optionsOrUmbral === "number"
-      ? { umbralRadioCroma: optionsOrUmbral }
-      : optionsOrUmbral;
+    typeof optionsOrUmbral === "number" ? { umbralRadioCroma: optionsOrUmbral } : optionsOrUmbral;
 
   const umbralRadioCroma = opts.umbralRadioCroma ?? 0.15;
   const [h, w] = shapeOriginal;

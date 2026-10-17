@@ -48,13 +48,16 @@ export async function saveImageRgb(
   outputPath: string,
   quality: number = 95
 ): Promise<void> {
-  const pipeline = sharp(Buffer.from(image.data.buffer, image.data.byteOffset, image.data.byteLength), {
-    raw: {
-      width: image.width,
-      height: image.height,
-      channels: 3,
-    },
-  });
+  const pipeline = sharp(
+    Buffer.from(image.data.buffer, image.data.byteOffset, image.data.byteLength),
+    {
+      raw: {
+        width: image.width,
+        height: image.height,
+        channels: 3,
+      },
+    }
+  );
 
   if (outputPath.endsWith(".png")) {
     await pipeline.png().toFile(outputPath);

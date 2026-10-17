@@ -1,0 +1,20 @@
+# Dependencies & Build
+node_modules/
+dist/
+bun.lock
+*.tsbuildinfo
+
+# Python / Jupyter
+.venv/
+venv/
+ENV/
+__pycache__/
+.ipynb_checkpoints/
+*.ipynb
+
+# Scratch, Agent configs & Binary assets
+.agents/
+experiments/scratch/
+experiments/outputs/
+experiments/assets/
+.DS_Store

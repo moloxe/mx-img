@@ -120,8 +120,12 @@ if (import.meta.main) {
   console.log("=".repeat(80));
   console.log(`• Imagen de entrada             : ${imgPath}`);
   console.log(`• Dimensiones (W × H × C)       : ${w} × ${h} × 3 (${nPix.toLocaleString()} px)`);
-  console.log(`• Umbral radio croma            : ${(umbral * 100).toFixed(1)}% (k_croma = ${encoded.kCroma.toLocaleString()})`);
-  console.log(`• Coeficientes complejos 1D     : ${encoded.numCoefficients.toLocaleString()} (${sizeMb.toFixed(2)} MB)`);
+  console.log(
+    `• Umbral radio croma            : ${(umbral * 100).toFixed(1)}% (k_croma = ${encoded.kCroma.toLocaleString()})`
+  );
+  console.log(
+    `• Coeficientes complejos 1D     : ${encoded.numCoefficients.toLocaleString()} (${sizeMb.toFixed(2)} MB)`
+  );
   console.log(`• Reducción frente a modo 1:1:1 : -${savingPct.toFixed(2)}%`);
   console.log(`• Tiempo de codificación        : ${elapsedMs.toFixed(1)} ms`);
   console.log("=".repeat(80));
@@ -129,6 +133,8 @@ if (import.meta.main) {
   if (outputBinPath) {
     const bin = serializeFourierStream(encoded);
     await Bun.write(outputBinPath, bin);
-    console.log(`✅ Stream binario guardado en: ${outputBinPath} (${(bin.byteLength / (1024 * 1024)).toFixed(2)} MB)`);
+    console.log(
+      `✅ Stream binario guardado en: ${outputBinPath} (${(bin.byteLength / (1024 * 1024)).toFixed(2)} MB)`
+    );
   }
 }

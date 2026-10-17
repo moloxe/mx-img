@@ -8,13 +8,16 @@
     "test": "bun test",
     "encode": "bun run src/utils/encoding/encoder.ts",
     "decode": "bun run src/utils/encoding/decoder.ts",
-    "typecheck": "bun x tsc --noEmit"
+    "typecheck": "bun x tsc --noEmit",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
   },
   "dependencies": {
     "sharp": "^0.33.5"
   },
   "devDependencies": {
     "@types/bun": "latest",
+    "prettier": "^3.9.10",
     "typescript": "^5.7.2"
   }
 }
