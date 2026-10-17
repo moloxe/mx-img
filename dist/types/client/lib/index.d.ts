@@ -47,6 +47,7 @@ declare class StreamConnectionManager {
     registerElement(id: string, element: MxImg): void;
     unregisterElement(id: string, element: MxImg): void;
     private routeFrameToSubscribers;
+    hasOtherActiveSubscriber(id: string, excludeElement: MxImg): boolean;
     private hasActiveSubscribers;
     private resubscribeActiveWithOffset;
     private setupIntersectionObserver;
@@ -70,6 +71,7 @@ declare const BaseCanvasClass: typeof HTMLCanvasElement;
  */
 export declare class MxImg extends BaseCanvasClass {
     static get observedAttributes(): string[];
+    private static decodedFrameCache;
     private decoder;
     private state;
     private streamId;

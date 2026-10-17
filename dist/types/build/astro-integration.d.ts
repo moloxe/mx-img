@@ -15,6 +15,11 @@ export interface AstroIntegrationLike {
             updateConfig: (newConfig: Record<string, unknown>) => void;
             injectScript?: (stage: string, content: string) => void;
         }) => Promise<void> | void;
+        "astro:server:setup"?: (params: {
+            server: {
+                httpServer?: unknown;
+            };
+        }) => Promise<void> | void;
         "astro:build:done"?: (params: {
             dir: URL;
         }) => Promise<void> | void;

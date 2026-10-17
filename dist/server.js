@@ -142,8 +142,10 @@ function toWebSocketUrl(streamUrl = DEFAULT_STREAM_URL) {
   return `ws://${trimmed}`;
 }
 // src/server/stream-server.ts
+import { createHash as createHash2, randomUUID } from "crypto";
 import { existsSync as existsSync3 } from "fs";
 import { readFile as readFile3 } from "fs/promises";
+import http from "http";
 import { basename as basename3, join as join3, resolve as resolve2 } from "path";
 
 // src/build/builder.ts
@@ -661,6 +663,13 @@ function resolveManifestEntry(manifest, idOrSrc) {
   if (byBase && manifest.entriesByHash[byBase]) {
     return manifest.entriesByHash[byBase];
   }
+  const unhashedBase = base.replace(/^(.+)\.[a-zA-Z0-9_-]{6,16}(\.[a-zA-Z0-9]+)$/, "$1$2");
+  if (unhashedBase !== base) {
+    const byUnhashed = manifest.hashBySource[unhashedBase];
+    if (byUnhashed && manifest.entriesByHash[byUnhashed]) {
+      return manifest.entriesByHash[byUnhashed];
+    }
+  }
   return;
 }
 async function loadManifest(mxImgDir) {
@@ -735,9 +744,7 @@ async function buildSingleMxImgAsset(imagePath, outDir, manifest, options = {}) 
 if (false) {}
 
 // src/server/stream-server.ts
-function createMxImgStreamServer(options = {}) {
-  const port = options.port ?? 8080;
-  const hostname = options.hostname ?? "localhost";
+function createMxImgStreamEngine(options = {}) {
   const streamPath = options.streamPath ?? "/.mx-img/stream";
   const rootDir = resolve2(options.rootDir ?? process.cwd());
   const mxImgDir = resolve2(rootDir, options.mxImgDir ?? "dist/.mx-img");
@@ -784,18 +791,23 @@ function createMxImgStreamServer(options = {}) {
       assetCache.set(cleanId, bytes);
       return bytes;
     }
-    const cleanRel = cleanId.replace(/^(\.\.\/)+/, "").replace(/^\//, "");
+    const withoutQuery = cleanId.split("?")[0].split("#")[0].replace(/^\/@fs\//, "/");
+    const cleanRel = withoutQuery.replace(/^(\.\.\/)+/, "").replace(/^\//, "");
+    const base = basename3(cleanRel);
+    const unhashedBase = base.replace(/^(.+)\.[a-zA-Z0-9_-]{6,16}(\.[a-zA-Z0-9]+)$/, "$1$2");
     const candidateSourcePaths = [
+      withoutQuery,
       resolve2(rootDir, cleanRel),
       resolve2(rootDir, "src", cleanRel),
-      join3(fallbackAssetsDir, basename3(cleanRel))
+      join3(fallbackAssetsDir, base),
+      ...unhashedBase !== base ? [join3(fallbackAssetsDir, unhashedBase)] : []
     ];
     for (const candidate of candidateSourcePaths) {
       if (existsSync3(candidate) && !candidate.endsWith(".mximg")) {
         const activeManifest = await getManifest();
         const builtEntry = await buildSingleMxImgAsset(candidate, mxImgDir, activeManifest, {
           rootDir,
-          aliases: [cleanId]
+          aliases: [cleanId, withoutQuery]
         });
         await saveManifest(mxImgDir, activeManifest);
         const bundlePath = join3(mxImgDir, builtEntry.fileName);
@@ -980,6 +992,219 @@ function createMxImgStreamServer(options = {}) {
       }
     }
   }
+  function createSession() {
+    return {
+      sessionId: randomUUID(),
+      tasks: new Map,
+      activeQueue: [],
+      schedulerRunning: false,
+      pendingCommands: 0,
+      commandChain: Promise.resolve(),
+      throttleDelayMs: defaultThrottleDelayMs,
+      timer: null
+    };
+  }
+  function handleIncomingMessage(ws, message) {
+    const session = ws.data;
+    session.pendingCommands++;
+    session.commandChain = session.commandChain.then(async () => {
+      try {
+        const text = typeof message === "string" ? message : new TextDecoder().decode(message);
+        const cmd = JSON.parse(text);
+        await handleClientCommand(ws, cmd);
+      } catch (err) {
+        const errMsg = {
+          type: "error",
+          id: "unknown",
+          message: err instanceof Error ? err.message : "Comando inv\xE1lido"
+        };
+        ws.sendText(JSON.stringify(errMsg));
+      } finally {
+        session.pendingCommands = Math.max(0, session.pendingCommands - 1);
+        if (session.pendingCommands === 0 && session.activeQueue.length > 0) {
+          scheduleNextTurn(ws);
+        }
+      }
+    }).catch(() => {
+      session.pendingCommands = Math.max(0, session.pendingCommands - 1);
+    });
+  }
+  function cleanupSession(session) {
+    if (session.timer) {
+      clearTimeout(session.timer);
+      session.timer = null;
+    }
+    session.activeQueue.length = 0;
+    session.tasks.clear();
+  }
+  return {
+    streamPath,
+    assetCache,
+    createSession,
+    handleIncomingMessage,
+    cleanupSession
+  };
+}
+function encodeWsServerFrame(opcode, payload) {
+  const len = payload.byteLength;
+  let headerLen = 2;
+  if (len >= 65536) {
+    headerLen = 10;
+  } else if (len >= 126) {
+    headerLen = 4;
+  }
+  const out = new Uint8Array(headerLen + len);
+  out[0] = 128 | opcode & 15;
+  if (len < 126) {
+    out[1] = len;
+  } else if (len < 65536) {
+    out[1] = 126;
+    out[2] = len >> 8 & 255;
+    out[3] = len & 255;
+  } else {
+    out[1] = 127;
+    const dv = new DataView(out.buffer, out.byteOffset, 10);
+    dv.setUint32(2, 0, false);
+    dv.setUint32(6, len, false);
+  }
+  out.set(payload, headerLen);
+  return out;
+}
+var attachedServers = new WeakSet;
+function attachMxImgUpgradeHandler(httpServer, options = {}) {
+  if (!httpServer || typeof httpServer.on !== "function" || attachedServers.has(httpServer)) {
+    return;
+  }
+  attachedServers.add(httpServer);
+  const engine = createMxImgStreamEngine(options);
+  const textEncoder2 = new TextEncoder;
+  httpServer.on("upgrade", (req, socket, head) => {
+    try {
+      const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+      if (url.pathname !== engine.streamPath) {
+        return;
+      }
+      const key = req.headers["sec-websocket-key"];
+      if (!key || typeof key !== "string") {
+        socket.destroy();
+        return;
+      }
+      const accept = createHash2("sha1").update(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest("base64");
+      socket.write(`HTTP/1.1 101 Switching Protocols\r
+` + `Upgrade: websocket\r
+` + `Connection: Upgrade\r
+` + `Sec-WebSocket-Accept: ${accept}\r
+\r
+`);
+      if ("setNoDelay" in socket && typeof socket.setNoDelay === "function") {
+        socket.setNoDelay(true);
+      }
+      const session = engine.createSession();
+      let isOpen = true;
+      const wsAdapter = {
+        data: session,
+        get readyState() {
+          return isOpen && !socket.destroyed && socket.writable ? 1 : 3;
+        },
+        sendBinary(data) {
+          if (this.readyState === 1) {
+            socket.write(encodeWsServerFrame(2, data));
+          }
+        },
+        sendText(text) {
+          if (this.readyState === 1) {
+            socket.write(encodeWsServerFrame(1, textEncoder2.encode(text)));
+          }
+        }
+      };
+      let recvBuf = Buffer.alloc(0);
+      const processBuffer = (chunk) => {
+        if (chunk.length > 0) {
+          recvBuf = recvBuf.length === 0 ? chunk : Buffer.concat([recvBuf, chunk]);
+        }
+        while (recvBuf.length >= 2) {
+          const byte0 = recvBuf[0];
+          const byte1 = recvBuf[1];
+          const opcode = byte0 & 15;
+          const masked = (byte1 & 128) !== 0;
+          let payloadLen = byte1 & 127;
+          let offset = 2;
+          if (payloadLen === 126) {
+            if (recvBuf.length < 4)
+              return;
+            payloadLen = recvBuf.readUInt16BE(2);
+            offset = 4;
+          } else if (payloadLen === 127) {
+            if (recvBuf.length < 10)
+              return;
+            payloadLen = Number(recvBuf.readBigUInt64BE(2));
+            offset = 10;
+          }
+          const maskLen = masked ? 4 : 0;
+          if (recvBuf.length < offset + maskLen + payloadLen) {
+            return;
+          }
+          const maskKey = masked ? recvBuf.subarray(offset, offset + 4) : null;
+          offset += maskLen;
+          const payload = new Uint8Array(payloadLen);
+          payload.set(recvBuf.subarray(offset, offset + payloadLen));
+          recvBuf = recvBuf.subarray(offset + payloadLen);
+          if (maskKey) {
+            for (let i = 0;i < payloadLen; i++) {
+              payload[i] ^= maskKey[i & 3];
+            }
+          }
+          if (opcode === 8) {
+            isOpen = false;
+            engine.cleanupSession(session);
+            socket.end(encodeWsServerFrame(8, new Uint8Array(0)));
+            return;
+          }
+          if (opcode === 9) {
+            if (wsAdapter.readyState === 1) {
+              socket.write(encodeWsServerFrame(10, payload));
+            }
+            continue;
+          }
+          if (opcode === 1 || opcode === 2) {
+            engine.handleIncomingMessage(wsAdapter, payload);
+          }
+        }
+      };
+      if (head && head.length > 0) {
+        processBuffer(head);
+      }
+      socket.on("data", (chunk) => {
+        processBuffer(chunk);
+      });
+      const handleClose = () => {
+        isOpen = false;
+        engine.cleanupSession(session);
+      };
+      socket.on("close", handleClose);
+      socket.on("end", handleClose);
+      socket.on("error", handleClose);
+    } catch {
+      socket.destroy();
+    }
+  });
+}
+var autoHookInstalled = false;
+function installMxImgAutoServerHook(options = {}) {
+  if (autoHookInstalled)
+    return;
+  autoHookInstalled = true;
+  const origListen = http.Server.prototype.listen;
+  http.Server.prototype.listen = function(...args) {
+    attachMxImgUpgradeHandler(this, options);
+    return origListen.apply(this, args);
+  };
+}
+function createMxImgStreamServer(options = {}) {
+  const port = options.port ?? 8080;
+  const hostname = options.hostname ?? "localhost";
+  const engine = createMxImgStreamEngine(options);
+  const { streamPath } = engine;
   const server = Bun.serve({
     port,
     hostname,
@@ -997,16 +1222,7 @@ function createMxImgStreamServer(options = {}) {
       }
       if (url.pathname === streamPath) {
         const upgraded = srv.upgrade(req, {
-          data: {
-            sessionId: crypto.randomUUID(),
-            tasks: new Map,
-            activeQueue: [],
-            schedulerRunning: false,
-            pendingCommands: 0,
-            commandChain: Promise.resolve(),
-            throttleDelayMs: defaultThrottleDelayMs,
-            timer: null
-          }
+          data: engine.createSession()
         });
         if (upgraded) {
           return;
@@ -1035,38 +1251,10 @@ function createMxImgStreamServer(options = {}) {
     websocket: {
       open(_ws) {},
       message(ws, message) {
-        const session = ws.data;
-        session.pendingCommands++;
-        session.commandChain = session.commandChain.then(async () => {
-          try {
-            const text = typeof message === "string" ? message : new TextDecoder().decode(message);
-            const cmd = JSON.parse(text);
-            await handleClientCommand(ws, cmd);
-          } catch (err) {
-            const errMsg = {
-              type: "error",
-              id: "unknown",
-              message: err instanceof Error ? err.message : "Comando inv\xE1lido"
-            };
-            ws.sendText(JSON.stringify(errMsg));
-          } finally {
-            session.pendingCommands = Math.max(0, session.pendingCommands - 1);
-            if (session.pendingCommands === 0 && session.activeQueue.length > 0) {
-              scheduleNextTurn(ws);
-            }
-          }
-        }).catch(() => {
-          session.pendingCommands = Math.max(0, session.pendingCommands - 1);
-        });
+        engine.handleIncomingMessage(ws, message);
       },
       close(ws) {
-        const session = ws.data;
-        if (session.timer) {
-          clearTimeout(session.timer);
-          session.timer = null;
-        }
-        session.activeQueue.length = 0;
-        session.tasks.clear();
+        engine.cleanupSession(ws.data);
       }
     }
   });
@@ -1076,7 +1264,7 @@ function createMxImgStreamServer(options = {}) {
     port: actualPort,
     streamUrl: `http://${hostname}:${actualPort}${streamPath}`,
     registerMemoryAsset(id, bytes) {
-      assetCache.set(id, bytes);
+      engine.assetCache.set(id, bytes);
     },
     stop(closeActiveConnections = true) {
       server.stop(closeActiveConnections);
@@ -1089,8 +1277,11 @@ export {
   DEFAULT_STREAM_URL,
   FRAME_FLAG_COMPLETED,
   FRAME_FLAG_HAS_EMBEDDED_HEADER,
+  attachMxImgUpgradeHandler,
+  createMxImgStreamEngine,
   createMxImgStreamServer,
   decodeServerChunkFrame,
   encodeServerChunkFrame,
+  installMxImgAutoServerHook,
   toWebSocketUrl
 };

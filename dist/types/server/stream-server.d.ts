@@ -25,6 +25,12 @@ export interface ClientSessionData {
     /** Timer activo del planificador */
     timer: ReturnType<typeof setTimeout> | null;
 }
+export interface MxImgSocketTransport {
+    data: ClientSessionData;
+    readonly readyState: number;
+    sendBinary(data: Uint8Array): void;
+    sendText(text: string): void;
+}
 export interface MxImgStreamServerOptions {
     /** Puerto donde escucha el servicio (por defecto `8080`) */
     port?: number;
@@ -47,6 +53,25 @@ export interface MxImgStreamServerOptions {
     /** Manejador HTTP adicional para rutas estáticas (ej. usado por el servidor de mockup) */
     onHttpRequest?: (req: Request, server: Server<ClientSessionData>) => Promise<Response | null> | Response | null;
 }
+export declare function createMxImgStreamEngine(options?: MxImgStreamServerOptions): {
+    streamPath: string;
+    assetCache: Map<string, Uint8Array<ArrayBufferLike>>;
+    createSession: () => ClientSessionData;
+    handleIncomingMessage: (ws: MxImgSocketTransport, message: string | Uint8Array) => void;
+    cleanupSession: (session: ClientSessionData) => void;
+};
+/**
+ * Adjunta el manejador WebSocket de `<mx-img />` (`/.mx-img/stream`) sobre cualquier servidor
+ * `node:http` / Vite / Astro (`httpServer.on("upgrade")`).
+ */
+export declare function attachMxImgUpgradeHandler(httpServer: {
+    on?: (event: string, listener: (...args: any[]) => void) => unknown;
+} | null | undefined, options?: MxImgStreamServerOptions): void;
+/**
+ * Registra un hook automático sobre `http.Server.prototype.listen` para que servidores standalone
+ * de Astro (`@astrojs/node`) sirvan automáticamente `/.mx-img/stream` en el mismo puerto.
+ */
+export declare function installMxImgAutoServerHook(options?: MxImgStreamServerOptions): void;
 /**
  * Crea y levanta el servidor de streaming de `<mx-img />` sobre Bun (`Bun.serve`).
  *

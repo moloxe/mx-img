@@ -154,7 +154,16 @@ export function transformHtmlForMxImg(
   const mxImgRegex = /<mx-img\b([^>]*?)(?:\/>|><\/mx-img>)/gi;
   let result = html.replace(mxImgRegex, (fullMatch, attrsStr: string) => {
     const srcMatch = attrsStr.match(/\bsrc\s*=\s*["']([^"']+)["']/i);
-    if (!srcMatch) return fullMatch;
+    if (!srcMatch) {
+      // Si `src={...}` es una expresión dinámica JSX/TSX, convertir igualmente a `<canvas is="mx-img">`
+      if (/\bsrc\s*=\s*\{/i.test(attrsStr) && outputTag === "canvas") {
+        replacedCount++;
+        const hasIsAttr = /\bis\s*=\s*["']mx-img["']/i.test(attrsStr);
+        const isAttr = hasIsAttr ? "" : ` is="mx-img"`;
+        return `<canvas${isAttr}${attrsStr}></canvas>`;
+      }
+      return fullMatch;
+    }
 
     const rawSrc = srcMatch[1];
     const entry = resolveManifestEntry(manifest, rawSrc);

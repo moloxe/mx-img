@@ -1,7 +1,8 @@
-import { cp, mkdir } from "node:fs/promises";
+import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { attachMxImgUpgradeHandler } from "../server/stream-server.ts";
 import { buildMxImgAssets } from "./builder.ts";
 import { mxImgVitePlugin, type MxImgVitePluginOptions } from "./vite-plugin.ts";
 
@@ -18,6 +19,7 @@ export interface AstroIntegrationLike {
       updateConfig: (newConfig: Record<string, unknown>) => void;
       injectScript?: (stage: string, content: string) => void;
     }) => Promise<void> | void;
+    "astro:server:setup"?: (params: { server: { httpServer?: unknown } }) => Promise<void> | void;
     "astro:build:done"?: (params: { dir: URL }) => Promise<void> | void;
   };
 }
@@ -66,9 +68,18 @@ export function mxImgAstroIntegration(options: MxImgAstroOptions = {}): AstroInt
         }
       },
 
+      async "astro:server:setup"({ server }) {
+        attachMxImgUpgradeHandler(server?.httpServer as any, {
+          rootDir,
+          mxImgDir: join(distRootDir, options.mxImgSubDir ?? ".mx-img"),
+          fallbackAssetsDir: options.assetsDir ?? "src/assets/images",
+        });
+      },
+
       async "astro:build:done"({ dir }) {
         const buildOutPath = dir ? fileURLToPath(dir) : distRootDir;
-        const primaryMxImgDir = join(distRootDir, options.mxImgSubDir ?? ".mx-img");
+        const subDir = options.mxImgSubDir ?? ".mx-img";
+        const primaryMxImgDir = join(distRootDir, subDir);
 
         await buildMxImgAssets({
           rootDir,
@@ -78,13 +89,28 @@ export function mxImgAstroIntegration(options: MxImgAstroOptions = {}): AstroInt
         });
 
         // En Astro hybrid/server `dir` suele apuntar a `dist/client/`; sincronizamos si difiere de `dist/`
-        const targetClientMxImgDir = join(buildOutPath, options.mxImgSubDir ?? ".mx-img");
+        const targetClientMxImgDir = join(buildOutPath, subDir);
         if (
           resolve(targetClientMxImgDir) !== resolve(primaryMxImgDir) &&
           existsSync(primaryMxImgDir)
         ) {
           await mkdir(targetClientMxImgDir, { recursive: true });
           await cp(primaryMxImgDir, targetClientMxImgDir, { recursive: true });
+        }
+
+        // Si existe `dist/server/entry.mjs` (ej. @astrojs/node standalone), registrar auto-hook de WebSocket
+        const serverEntryPath = join(distRootDir, "server", "entry.mjs");
+        if (existsSync(serverEntryPath)) {
+          const entryCode = await readFile(serverEntryPath, "utf8");
+          if (!entryCode.includes("installMxImgAutoServerHook")) {
+            const hookLine = `import { installMxImgAutoServerHook as __mxImgHook } from "mx-img/server";\n__mxImgHook(${JSON.stringify(
+              {
+                mxImgDir: `dist/${subDir}`,
+                fallbackAssetsDir: options.assetsDir ?? "src/assets/images",
+              }
+            )});\n`;
+            await writeFile(serverEntryPath, hookLine + entryCode, "utf8");
+          }
         }
       },
     },

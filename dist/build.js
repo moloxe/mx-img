@@ -58,6 +58,13 @@ function resolveManifestEntry(manifest, idOrSrc) {
   if (byBase && manifest.entriesByHash[byBase]) {
     return manifest.entriesByHash[byBase];
   }
+  const unhashedBase = base.replace(/^(.+)\.[a-zA-Z0-9_-]{6,16}(\.[a-zA-Z0-9]+)$/, "$1$2");
+  if (unhashedBase !== base) {
+    const byUnhashed = manifest.hashBySource[unhashedBase];
+    if (byUnhashed && manifest.entriesByHash[byUnhashed]) {
+      return manifest.entriesByHash[byUnhashed];
+    }
+  }
   return;
 }
 async function loadManifest(mxImgDir) {
@@ -662,8 +669,15 @@ function transformHtmlForMxImg(html, manifest, options = {}) {
   const mxImgRegex = /<mx-img\b([^>]*?)(?:\/>|><\/mx-img>)/gi;
   let result = html.replace(mxImgRegex, (fullMatch, attrsStr) => {
     const srcMatch = attrsStr.match(/\bsrc\s*=\s*["']([^"']+)["']/i);
-    if (!srcMatch)
+    if (!srcMatch) {
+      if (/\bsrc\s*=\s*\{/i.test(attrsStr) && outputTag === "canvas") {
+        replacedCount++;
+        const hasIsAttr = /\bis\s*=\s*["']mx-img["']/i.test(attrsStr);
+        const isAttr = hasIsAttr ? "" : ` is="mx-img"`;
+        return `<canvas${isAttr}${attrsStr}></canvas>`;
+      }
       return fullMatch;
+    }
     const rawSrc = srcMatch[1];
     const entry = resolveManifestEntry(manifest, rawSrc);
     const resolvedSrc = entry ? entry.hash : rawSrc;
@@ -716,11 +730,506 @@ function transformHtmlForMxImg(html, manifest, options = {}) {
 }
 if (false) {}
 // src/build/vite-plugin.ts
+import { existsSync as existsSync4 } from "fs";
+import { dirname, join as join4, resolve as resolve3 } from "path";
+
+// src/server/stream-server.ts
+import { createHash as createHash2, randomUUID } from "crypto";
 import { existsSync as existsSync3 } from "fs";
-import { dirname, join as join3, resolve as resolve2 } from "path";
+import { readFile as readFile3 } from "fs/promises";
+import { basename as basename3, join as join3, resolve as resolve2 } from "path";
+
+// src/server/protocol.ts
+var DEFAULT_CHUNK_SIZE_BYTES = 100 * 1024;
+var FRAME_MAGIC = new Uint8Array([77, 88, 67, 72]);
+var BASE_ENVELOPE_BYTES = 24;
+var FRAME_FLAG_COMPLETED = 1 << 0;
+var FRAME_FLAG_HAS_EMBEDDED_HEADER = 1 << 1;
+var textEncoder = new TextEncoder;
+var textDecoder = new TextDecoder;
+function encodeServerChunkFrame(frame) {
+  const idBytes = textEncoder.encode(frame.id);
+  const hasEmbeddedHeader = frame.embeddedHeader !== undefined && frame.embeddedHeader.byteLength === HEADER_BYTE_LENGTH;
+  const embeddedLen = hasEmbeddedHeader ? HEADER_BYTE_LENGTH : 0;
+  const totalFrameLen = BASE_ENVELOPE_BYTES + idBytes.byteLength + embeddedLen + frame.payload.byteLength;
+  const buffer = new Uint8Array(totalFrameLen);
+  buffer.set(FRAME_MAGIC, 0);
+  let flags = 0;
+  if (frame.isComplete)
+    flags |= FRAME_FLAG_COMPLETED;
+  if (hasEmbeddedHeader)
+    flags |= FRAME_FLAG_HAS_EMBEDDED_HEADER;
+  const view = new DataView(buffer.buffer, buffer.byteOffset, BASE_ENVELOPE_BYTES);
+  view.setUint8(4, flags);
+  view.setUint8(5, 0);
+  view.setUint16(6, idBytes.byteLength, true);
+  view.setUint32(8, frame.offsetBytes, true);
+  view.setUint32(12, frame.deliveredBytes, true);
+  view.setUint32(16, frame.targetBytes, true);
+  view.setUint32(20, frame.totalAssetBytes, true);
+  let cursor = BASE_ENVELOPE_BYTES;
+  buffer.set(idBytes, cursor);
+  cursor += idBytes.byteLength;
+  if (hasEmbeddedHeader && frame.embeddedHeader) {
+    buffer.set(frame.embeddedHeader, cursor);
+    cursor += HEADER_BYTE_LENGTH;
+  }
+  buffer.set(frame.payload, cursor);
+  return buffer;
+}
+
+// src/server/stream-server.ts
+function createMxImgStreamEngine(options = {}) {
+  const streamPath = options.streamPath ?? "/.mx-img/stream";
+  const rootDir = resolve2(options.rootDir ?? process.cwd());
+  const mxImgDir = resolve2(rootDir, options.mxImgDir ?? "dist/.mx-img");
+  const fallbackAssetsDir = resolve2(rootDir, options.fallbackAssetsDir ?? "src/assets/images");
+  const defaultChunkSizeBytes = options.defaultChunkSizeBytes ?? DEFAULT_CHUNK_SIZE_BYTES;
+  const defaultThrottleDelayMs = options.defaultThrottleDelayMs ?? 1;
+  const assetCache = new Map;
+  if (options.customAssets) {
+    for (const [k, v] of Object.entries(options.customAssets)) {
+      assetCache.set(k, v);
+    }
+  }
+  let manifestCache = null;
+  async function getManifest() {
+    if (!manifestCache) {
+      manifestCache = await loadManifest(mxImgDir);
+    }
+    return manifestCache;
+  }
+  async function resolveAssetBytes(id) {
+    const cleanId = id.trim();
+    const cached = assetCache.get(cleanId);
+    if (cached) {
+      return cached;
+    }
+    const manifest = await getManifest();
+    let entry = resolveManifestEntry(manifest, cleanId);
+    if (!entry) {
+      manifestCache = await loadManifest(mxImgDir);
+      entry = resolveManifestEntry(manifestCache, cleanId);
+    }
+    if (entry) {
+      const bundlePath = join3(mxImgDir, entry.fileName);
+      if (existsSync3(bundlePath)) {
+        const bytes = new Uint8Array(await readFile3(bundlePath));
+        assetCache.set(cleanId, bytes);
+        assetCache.set(entry.hash, bytes);
+        return bytes;
+      }
+    }
+    const directBundlePath = join3(mxImgDir, cleanId.endsWith(".mximg") ? cleanId : `${cleanId}.mximg`);
+    if (existsSync3(directBundlePath)) {
+      const bytes = new Uint8Array(await readFile3(directBundlePath));
+      assetCache.set(cleanId, bytes);
+      return bytes;
+    }
+    const withoutQuery = cleanId.split("?")[0].split("#")[0].replace(/^\/@fs\//, "/");
+    const cleanRel = withoutQuery.replace(/^(\.\.\/)+/, "").replace(/^\//, "");
+    const base = basename3(cleanRel);
+    const unhashedBase = base.replace(/^(.+)\.[a-zA-Z0-9_-]{6,16}(\.[a-zA-Z0-9]+)$/, "$1$2");
+    const candidateSourcePaths = [
+      withoutQuery,
+      resolve2(rootDir, cleanRel),
+      resolve2(rootDir, "src", cleanRel),
+      join3(fallbackAssetsDir, base),
+      ...unhashedBase !== base ? [join3(fallbackAssetsDir, unhashedBase)] : []
+    ];
+    for (const candidate of candidateSourcePaths) {
+      if (existsSync3(candidate) && !candidate.endsWith(".mximg")) {
+        const activeManifest = await getManifest();
+        const builtEntry = await buildSingleMxImgAsset(candidate, mxImgDir, activeManifest, {
+          rootDir,
+          aliases: [cleanId, withoutQuery]
+        });
+        await saveManifest(mxImgDir, activeManifest);
+        const bundlePath = join3(mxImgDir, builtEntry.fileName);
+        const bytes = new Uint8Array(await readFile3(bundlePath));
+        assetCache.set(cleanId, bytes);
+        assetCache.set(builtEntry.hash, bytes);
+        return bytes;
+      }
+    }
+    return null;
+  }
+  function computeTargetBytes(totalBytes, maxPercent, maxBytes) {
+    let target = totalBytes;
+    if (maxBytes !== undefined && maxBytes > 0) {
+      target = Math.min(target, Math.floor(maxBytes));
+    }
+    if (maxPercent !== undefined && maxPercent > 0 && maxPercent < 100) {
+      const payloadBytes = Math.max(0, totalBytes - HEADER_BYTE_LENGTH);
+      const rawTargetPayload = Math.floor(payloadBytes * maxPercent / 100);
+      const alignedPayload = Math.max(16, Math.floor(rawTargetPayload / 16) * 16);
+      target = Math.min(target, Math.min(totalBytes, HEADER_BYTE_LENGTH + alignedPayload));
+    }
+    return Math.max(Math.min(HEADER_BYTE_LENGTH, totalBytes), target);
+  }
+  function removeFromActiveQueue(session, id) {
+    const idx = session.activeQueue.indexOf(id);
+    if (idx !== -1) {
+      session.activeQueue.splice(idx, 1);
+    }
+  }
+  function enqueueActiveTask(session, id) {
+    if (!session.activeQueue.includes(id)) {
+      session.activeQueue.push(id);
+    }
+  }
+  function scheduleNextTurn(ws) {
+    const session = ws.data;
+    if (session.schedulerRunning) {
+      return;
+    }
+    if (session.activeQueue.length === 0 || session.pendingCommands > 0) {
+      return;
+    }
+    session.schedulerRunning = true;
+    session.timer = setTimeout(() => {
+      session.schedulerRunning = false;
+      session.timer = null;
+      if (session.pendingCommands > 0) {
+        return;
+      }
+      processOneRoundRobinTurn(ws);
+    }, session.throttleDelayMs);
+  }
+  function processOneRoundRobinTurn(ws) {
+    const session = ws.data;
+    if (ws.readyState !== 1 || session.activeQueue.length === 0 || session.pendingCommands > 0) {
+      return;
+    }
+    const id = session.activeQueue.shift();
+    const task = session.tasks.get(id);
+    if (!task || task.status !== "active") {
+      if (session.activeQueue.length > 0) {
+        scheduleNextTurn(ws);
+      }
+      return;
+    }
+    const remaining = task.targetBytes - task.offsetBytes;
+    if (remaining <= 0) {
+      task.status = "completed";
+      if (session.activeQueue.length > 0) {
+        scheduleNextTurn(ws);
+      }
+      return;
+    }
+    const sliceLen = Math.min(task.chunkSizeBytes, remaining);
+    const chunkStart = task.offsetBytes;
+    const chunkEnd = chunkStart + sliceLen;
+    const payload = task.assetBytes.subarray(chunkStart, chunkEnd);
+    let embeddedHeader;
+    if (chunkStart > 0 && !task.sentEmbeddedHeader && task.assetBytes.byteLength >= HEADER_BYTE_LENGTH) {
+      embeddedHeader = task.assetBytes.subarray(0, HEADER_BYTE_LENGTH);
+      task.sentEmbeddedHeader = true;
+    } else if (chunkStart === 0) {
+      task.sentEmbeddedHeader = true;
+    }
+    task.offsetBytes = chunkEnd;
+    const isComplete = task.offsetBytes >= task.targetBytes;
+    if (isComplete) {
+      task.status = "completed";
+    } else {
+      session.activeQueue.push(id);
+    }
+    const frameBytes = encodeServerChunkFrame({
+      id: task.id,
+      offsetBytes: chunkStart,
+      deliveredBytes: chunkEnd,
+      targetBytes: task.targetBytes,
+      totalAssetBytes: task.assetBytes.byteLength,
+      isComplete,
+      payload,
+      embeddedHeader
+    });
+    ws.sendBinary(frameBytes);
+    if (session.activeQueue.length > 0) {
+      scheduleNextTurn(ws);
+    }
+  }
+  async function handleClientCommand(ws, cmd) {
+    const session = ws.data;
+    if (cmd.type === "throttle") {
+      session.throttleDelayMs = Math.max(0, cmd.delayMs);
+      return;
+    }
+    if (cmd.type === "pause") {
+      const task = session.tasks.get(cmd.id);
+      if (task && task.status === "active") {
+        task.status = "paused";
+        removeFromActiveQueue(session, cmd.id);
+      }
+      return;
+    }
+    if (cmd.type === "stop") {
+      removeFromActiveQueue(session, cmd.id);
+      session.tasks.delete(cmd.id);
+      return;
+    }
+    if (cmd.type === "resume") {
+      const task = session.tasks.get(cmd.id);
+      if (task) {
+        if (cmd.offsetBytes !== undefined && cmd.offsetBytes >= 0) {
+          task.offsetBytes = Math.min(cmd.offsetBytes, task.targetBytes);
+        }
+        if (cmd.maxPercent !== undefined || cmd.maxBytes !== undefined) {
+          task.targetBytes = computeTargetBytes(task.assetBytes.byteLength, cmd.maxPercent, cmd.maxBytes);
+        }
+        if (task.offsetBytes < task.targetBytes) {
+          task.status = "active";
+          enqueueActiveTask(session, cmd.id);
+          scheduleNextTurn(ws);
+        } else {
+          task.status = "completed";
+        }
+        return;
+      }
+      await handleClientCommand(ws, {
+        type: "start",
+        id: cmd.id,
+        offsetBytes: cmd.offsetBytes,
+        maxPercent: cmd.maxPercent,
+        maxBytes: cmd.maxBytes
+      });
+      return;
+    }
+    if (cmd.type === "start") {
+      const assetBytes = await resolveAssetBytes(cmd.id);
+      if (!assetBytes) {
+        const errMsg = {
+          type: "error",
+          id: cmd.id,
+          message: `No se encontr\xF3 el asset MxImg para '${cmd.id}'`
+        };
+        ws.sendText(JSON.stringify(errMsg));
+        return;
+      }
+      const targetBytes = computeTargetBytes(assetBytes.byteLength, cmd.maxPercent, cmd.maxBytes);
+      const startOffset = Math.max(0, Math.min(cmd.offsetBytes ?? 0, targetBytes));
+      const chunkSizeBytes = cmd.chunkSize && cmd.chunkSize > 0 ? Math.floor(cmd.chunkSize) : defaultChunkSizeBytes;
+      const existing = session.tasks.get(cmd.id);
+      const task = {
+        id: cmd.id,
+        assetBytes,
+        offsetBytes: startOffset,
+        targetBytes,
+        chunkSizeBytes,
+        status: startOffset >= targetBytes ? "completed" : "active",
+        sentEmbeddedHeader: existing?.sentEmbeddedHeader ?? false
+      };
+      session.tasks.set(cmd.id, task);
+      if (task.status === "active") {
+        enqueueActiveTask(session, cmd.id);
+        scheduleNextTurn(ws);
+      }
+    }
+  }
+  function createSession() {
+    return {
+      sessionId: randomUUID(),
+      tasks: new Map,
+      activeQueue: [],
+      schedulerRunning: false,
+      pendingCommands: 0,
+      commandChain: Promise.resolve(),
+      throttleDelayMs: defaultThrottleDelayMs,
+      timer: null
+    };
+  }
+  function handleIncomingMessage(ws, message) {
+    const session = ws.data;
+    session.pendingCommands++;
+    session.commandChain = session.commandChain.then(async () => {
+      try {
+        const text = typeof message === "string" ? message : new TextDecoder().decode(message);
+        const cmd = JSON.parse(text);
+        await handleClientCommand(ws, cmd);
+      } catch (err) {
+        const errMsg = {
+          type: "error",
+          id: "unknown",
+          message: err instanceof Error ? err.message : "Comando inv\xE1lido"
+        };
+        ws.sendText(JSON.stringify(errMsg));
+      } finally {
+        session.pendingCommands = Math.max(0, session.pendingCommands - 1);
+        if (session.pendingCommands === 0 && session.activeQueue.length > 0) {
+          scheduleNextTurn(ws);
+        }
+      }
+    }).catch(() => {
+      session.pendingCommands = Math.max(0, session.pendingCommands - 1);
+    });
+  }
+  function cleanupSession(session) {
+    if (session.timer) {
+      clearTimeout(session.timer);
+      session.timer = null;
+    }
+    session.activeQueue.length = 0;
+    session.tasks.clear();
+  }
+  return {
+    streamPath,
+    assetCache,
+    createSession,
+    handleIncomingMessage,
+    cleanupSession
+  };
+}
+function encodeWsServerFrame(opcode, payload) {
+  const len = payload.byteLength;
+  let headerLen = 2;
+  if (len >= 65536) {
+    headerLen = 10;
+  } else if (len >= 126) {
+    headerLen = 4;
+  }
+  const out = new Uint8Array(headerLen + len);
+  out[0] = 128 | opcode & 15;
+  if (len < 126) {
+    out[1] = len;
+  } else if (len < 65536) {
+    out[1] = 126;
+    out[2] = len >> 8 & 255;
+    out[3] = len & 255;
+  } else {
+    out[1] = 127;
+    const dv = new DataView(out.buffer, out.byteOffset, 10);
+    dv.setUint32(2, 0, false);
+    dv.setUint32(6, len, false);
+  }
+  out.set(payload, headerLen);
+  return out;
+}
+var attachedServers = new WeakSet;
+function attachMxImgUpgradeHandler(httpServer, options = {}) {
+  if (!httpServer || typeof httpServer.on !== "function" || attachedServers.has(httpServer)) {
+    return;
+  }
+  attachedServers.add(httpServer);
+  const engine = createMxImgStreamEngine(options);
+  const textEncoder2 = new TextEncoder;
+  httpServer.on("upgrade", (req, socket, head) => {
+    try {
+      const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+      if (url.pathname !== engine.streamPath) {
+        return;
+      }
+      const key = req.headers["sec-websocket-key"];
+      if (!key || typeof key !== "string") {
+        socket.destroy();
+        return;
+      }
+      const accept = createHash2("sha1").update(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest("base64");
+      socket.write(`HTTP/1.1 101 Switching Protocols\r
+` + `Upgrade: websocket\r
+` + `Connection: Upgrade\r
+` + `Sec-WebSocket-Accept: ${accept}\r
+\r
+`);
+      if ("setNoDelay" in socket && typeof socket.setNoDelay === "function") {
+        socket.setNoDelay(true);
+      }
+      const session = engine.createSession();
+      let isOpen = true;
+      const wsAdapter = {
+        data: session,
+        get readyState() {
+          return isOpen && !socket.destroyed && socket.writable ? 1 : 3;
+        },
+        sendBinary(data) {
+          if (this.readyState === 1) {
+            socket.write(encodeWsServerFrame(2, data));
+          }
+        },
+        sendText(text) {
+          if (this.readyState === 1) {
+            socket.write(encodeWsServerFrame(1, textEncoder2.encode(text)));
+          }
+        }
+      };
+      let recvBuf = Buffer.alloc(0);
+      const processBuffer = (chunk) => {
+        if (chunk.length > 0) {
+          recvBuf = recvBuf.length === 0 ? chunk : Buffer.concat([recvBuf, chunk]);
+        }
+        while (recvBuf.length >= 2) {
+          const byte0 = recvBuf[0];
+          const byte1 = recvBuf[1];
+          const opcode = byte0 & 15;
+          const masked = (byte1 & 128) !== 0;
+          let payloadLen = byte1 & 127;
+          let offset = 2;
+          if (payloadLen === 126) {
+            if (recvBuf.length < 4)
+              return;
+            payloadLen = recvBuf.readUInt16BE(2);
+            offset = 4;
+          } else if (payloadLen === 127) {
+            if (recvBuf.length < 10)
+              return;
+            payloadLen = Number(recvBuf.readBigUInt64BE(2));
+            offset = 10;
+          }
+          const maskLen = masked ? 4 : 0;
+          if (recvBuf.length < offset + maskLen + payloadLen) {
+            return;
+          }
+          const maskKey = masked ? recvBuf.subarray(offset, offset + 4) : null;
+          offset += maskLen;
+          const payload = new Uint8Array(payloadLen);
+          payload.set(recvBuf.subarray(offset, offset + payloadLen));
+          recvBuf = recvBuf.subarray(offset + payloadLen);
+          if (maskKey) {
+            for (let i = 0;i < payloadLen; i++) {
+              payload[i] ^= maskKey[i & 3];
+            }
+          }
+          if (opcode === 8) {
+            isOpen = false;
+            engine.cleanupSession(session);
+            socket.end(encodeWsServerFrame(8, new Uint8Array(0)));
+            return;
+          }
+          if (opcode === 9) {
+            if (wsAdapter.readyState === 1) {
+              socket.write(encodeWsServerFrame(10, payload));
+            }
+            continue;
+          }
+          if (opcode === 1 || opcode === 2) {
+            engine.handleIncomingMessage(wsAdapter, payload);
+          }
+        }
+      };
+      if (head && head.length > 0) {
+        processBuffer(head);
+      }
+      socket.on("data", (chunk) => {
+        processBuffer(chunk);
+      });
+      const handleClose = () => {
+        isOpen = false;
+        engine.cleanupSession(session);
+      };
+      socket.on("close", handleClose);
+      socket.on("end", handleClose);
+      socket.on("error", handleClose);
+    } catch {
+      socket.destroy();
+    }
+  });
+}
+if (false) {}
+
+// src/build/vite-plugin.ts
 function mxImgVitePlugin(options = {}) {
   let rootDir = process.cwd();
-  let outDir = resolve2(rootDir, "dist/.mx-img");
+  let outDir = resolve3(rootDir, "dist/.mx-img");
   let manifest = createEmptyManifest();
   const umbralRadioCroma = options.umbralRadioCroma ?? 0.15;
   const mxImgSubDir = options.mxImgSubDir ?? ".mx-img";
@@ -734,11 +1243,11 @@ function mxImgVitePlugin(options = {}) {
       }
       const candidatePaths = [];
       if (importerPath) {
-        candidatePaths.push(resolve2(dirname(importerPath), rawSrc));
+        candidatePaths.push(resolve3(dirname(importerPath), rawSrc));
       }
-      candidatePaths.push(resolve2(rootDir, rawSrc.replace(/^\//, "")), resolve2(rootDir, "src", rawSrc.replace(/^\//, "")), resolve2(rootDir, options.assetsDir ?? "src/assets/images", rawSrc.split("/").pop() ?? rawSrc));
+      candidatePaths.push(resolve3(rootDir, rawSrc.replace(/^\//, "")), resolve3(rootDir, "src", rawSrc.replace(/^\//, "")), resolve3(rootDir, options.assetsDir ?? "src/assets/images", rawSrc.split("/").pop() ?? rawSrc));
       for (const candidate of candidatePaths) {
-        if (existsSync3(candidate)) {
+        if (existsSync4(candidate)) {
           await buildSingleMxImgAsset(candidate, outDir, manifest, {
             rootDir,
             umbralRadioCroma,
@@ -753,9 +1262,23 @@ function mxImgVitePlugin(options = {}) {
     name: "vite-plugin-mx-img",
     enforce: "pre",
     async configResolved(config) {
-      rootDir = resolve2(config.root ?? process.cwd());
+      rootDir = resolve3(config.root ?? process.cwd());
       const viteOutDir = config.build?.outDir ?? "dist";
-      outDir = resolve2(rootDir, join3(viteOutDir, mxImgSubDir));
+      outDir = resolve3(rootDir, join4(viteOutDir, mxImgSubDir));
+    },
+    configureServer(server) {
+      attachMxImgUpgradeHandler(server?.httpServer, {
+        rootDir,
+        mxImgDir: outDir,
+        fallbackAssetsDir: options.assetsDir ?? "src/assets/images"
+      });
+    },
+    configurePreviewServer(server) {
+      attachMxImgUpgradeHandler(server?.httpServer, {
+        rootDir,
+        mxImgDir: outDir,
+        fallbackAssetsDir: options.assetsDir ?? "src/assets/images"
+      });
     },
     async buildStart() {
       const built = await buildMxImgAssets({
@@ -797,13 +1320,13 @@ function mxImgVitePlugin(options = {}) {
   };
 }
 // src/build/astro-integration.ts
-import { cp, mkdir as mkdir3 } from "fs/promises";
-import { existsSync as existsSync4 } from "fs";
-import { join as join4, resolve as resolve3 } from "path";
+import { cp, mkdir as mkdir3, readFile as readFile4, writeFile as writeFile3 } from "fs/promises";
+import { existsSync as existsSync5 } from "fs";
+import { join as join5, resolve as resolve4 } from "path";
 import { fileURLToPath } from "url";
 function mxImgAstroIntegration(options = {}) {
   let rootDir = process.cwd();
-  let distRootDir = resolve3(rootDir, "dist");
+  let distRootDir = resolve4(rootDir, "dist");
   return {
     name: "mx-img-astro",
     hooks: {
@@ -814,7 +1337,7 @@ function mxImgAstroIntegration(options = {}) {
         if (config.outDir) {
           distRootDir = fileURLToPath(config.outDir);
         } else {
-          distRootDir = resolve3(rootDir, "dist");
+          distRootDir = resolve4(rootDir, "dist");
         }
         const plugin = mxImgVitePlugin({
           ...options,
@@ -829,19 +1352,40 @@ function mxImgAstroIntegration(options = {}) {
           injectScript("page", `import { init } from "mx-img/client"; init({ streamUrl: ${JSON.stringify(options.streamUrl)} });`);
         }
       },
+      async "astro:server:setup"({ server }) {
+        attachMxImgUpgradeHandler(server?.httpServer, {
+          rootDir,
+          mxImgDir: join5(distRootDir, options.mxImgSubDir ?? ".mx-img"),
+          fallbackAssetsDir: options.assetsDir ?? "src/assets/images"
+        });
+      },
       async "astro:build:done"({ dir }) {
         const buildOutPath = dir ? fileURLToPath(dir) : distRootDir;
-        const primaryMxImgDir = join4(distRootDir, options.mxImgSubDir ?? ".mx-img");
+        const subDir = options.mxImgSubDir ?? ".mx-img";
+        const primaryMxImgDir = join5(distRootDir, subDir);
         await buildMxImgAssets({
           rootDir,
           inputDir: options.assetsDir ?? "src/assets/images",
           outDir: primaryMxImgDir,
           umbralRadioCroma: options.umbralRadioCroma ?? 0.15
         });
-        const targetClientMxImgDir = join4(buildOutPath, options.mxImgSubDir ?? ".mx-img");
-        if (resolve3(targetClientMxImgDir) !== resolve3(primaryMxImgDir) && existsSync4(primaryMxImgDir)) {
+        const targetClientMxImgDir = join5(buildOutPath, subDir);
+        if (resolve4(targetClientMxImgDir) !== resolve4(primaryMxImgDir) && existsSync5(primaryMxImgDir)) {
           await mkdir3(targetClientMxImgDir, { recursive: true });
           await cp(primaryMxImgDir, targetClientMxImgDir, { recursive: true });
+        }
+        const serverEntryPath = join5(distRootDir, "server", "entry.mjs");
+        if (existsSync5(serverEntryPath)) {
+          const entryCode = await readFile4(serverEntryPath, "utf8");
+          if (!entryCode.includes("installMxImgAutoServerHook")) {
+            const hookLine = `import { installMxImgAutoServerHook as __mxImgHook } from "mx-img/server";
+__mxImgHook(${JSON.stringify({
+              mxImgDir: `dist/${subDir}`,
+              fallbackAssetsDir: options.assetsDir ?? "src/assets/images"
+            })});
+`;
+            await writeFile3(serverEntryPath, hookLine + entryCode, "utf8");
+          }
         }
       }
     }

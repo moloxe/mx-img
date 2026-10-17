@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { attachMxImgUpgradeHandler } from "../server/stream-server.ts";
 import { buildMxImgAssets, buildSingleMxImgAsset, transformHtmlForMxImg } from "./builder.ts";
 import {
   createEmptyManifest,
@@ -23,6 +24,8 @@ export interface VitePluginLike {
   name: string;
   enforce?: "pre" | "post";
   configResolved?: (config: { root?: string; build?: { outDir?: string } }) => Promise<void> | void;
+  configureServer?: (server: { httpServer?: unknown }) => Promise<void> | void;
+  configurePreviewServer?: (server: { httpServer?: unknown }) => Promise<void> | void;
   buildStart?: () => Promise<void> | void;
   transformIndexHtml?: (html: string, ctx?: { filename?: string }) => Promise<string> | string;
   transform?: (code: string, id: string) => Promise<{ code: string; map: null } | null> | null;
@@ -93,6 +96,22 @@ export function mxImgVitePlugin(options: MxImgVitePluginOptions = {}): VitePlugi
       rootDir = resolve(config.root ?? process.cwd());
       const viteOutDir = config.build?.outDir ?? "dist";
       outDir = resolve(rootDir, join(viteOutDir, mxImgSubDir));
+    },
+
+    configureServer(server) {
+      attachMxImgUpgradeHandler(server?.httpServer as any, {
+        rootDir,
+        mxImgDir: outDir,
+        fallbackAssetsDir: options.assetsDir ?? "src/assets/images",
+      });
+    },
+
+    configurePreviewServer(server) {
+      attachMxImgUpgradeHandler(server?.httpServer as any, {
+        rootDir,
+        mxImgDir: outDir,
+        fallbackAssetsDir: options.assetsDir ?? "src/assets/images",
+      });
     },
 
     async buildStart() {

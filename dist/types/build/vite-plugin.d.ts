@@ -17,6 +17,12 @@ export interface VitePluginLike {
             outDir?: string;
         };
     }) => Promise<void> | void;
+    configureServer?: (server: {
+        httpServer?: unknown;
+    }) => Promise<void> | void;
+    configurePreviewServer?: (server: {
+        httpServer?: unknown;
+    }) => Promise<void> | void;
     buildStart?: () => Promise<void> | void;
     transformIndexHtml?: (html: string, ctx?: {
         filename?: string;

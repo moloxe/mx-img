@@ -222,6 +222,17 @@ class StreamConnectionManager {
     }
   }
 
+  public hasOtherActiveSubscriber(id: string, excludeElement: MxImg): boolean {
+    const set = this.subscribers.get(id);
+    if (!set) return false;
+    for (const el of set) {
+      if (el !== excludeElement && el.getState() === "active") {
+        return true;
+      }
+    }
+    return false;
+  }
+
   private hasActiveSubscribers(): boolean {
     for (const set of this.subscribers.values()) {
       for (const el of set) {
@@ -358,6 +369,17 @@ export class MxImg extends BaseCanvasClass {
     return ["src", "data-max-percent", "max-percent", "data-offset-bytes"];
   }
 
+  private static decodedFrameCache = new Map<
+    string,
+    {
+      receivedBytes: number;
+      targetBytes: number;
+      totalAssetBytes: number;
+      isComplete: boolean;
+      decoded: NonNullable<ReturnType<ProgressiveFourierDecoder["decodeToRgba"]>>;
+    }
+  >();
+
   private decoder = new ProgressiveFourierDecoder();
   private state: MxImgLifecycleState = "sleeping";
   private streamId = "";
@@ -384,7 +406,10 @@ export class MxImg extends BaseCanvasClass {
   public disconnectedCallback(): void {
     this.clearScheduledDecode();
     if (this.streamId) {
-      if (this.state === "active") {
+      if (
+        this.state === "active" &&
+        !connectionManager.hasOtherActiveSubscriber(this.streamId, this)
+      ) {
         connectionManager.sendCommand({ type: "pause", id: this.streamId });
       }
       connectionManager.unregisterElement(this.streamId, this);
@@ -485,6 +510,30 @@ export class MxImg extends BaseCanvasClass {
 
     if (customOffsetBytes !== undefined && customOffsetBytes >= 0) {
       this.receivedBytes = customOffsetBytes;
+      MxImg.decodedFrameCache.delete(this.streamId);
+    } else {
+      const cached = MxImg.decodedFrameCache.get(this.streamId);
+      if (cached && cached.isComplete && this.getMaxPercent() === undefined) {
+        this.receivedBytes = cached.receivedBytes;
+        this.targetBytes = cached.targetBytes;
+        this.totalAssetBytes = cached.totalAssetBytes;
+        this.hasStartedStream = true;
+        this.updateStateAttribute("completed");
+        this.decode();
+        return;
+      }
+
+      if (connectionManager.hasOtherActiveSubscriber(this.streamId, this)) {
+        this.hasStartedStream = true;
+        this.updateStateAttribute("active");
+        if (cached && cached.receivedBytes > this.lastDecodedBytes) {
+          this.receivedBytes = cached.receivedBytes;
+          this.targetBytes = cached.targetBytes;
+          this.totalAssetBytes = cached.totalAssetBytes;
+          this.decode();
+        }
+        return;
+      }
     }
 
     const prevState = this.state;
@@ -518,10 +567,12 @@ export class MxImg extends BaseCanvasClass {
     }
     this.clearScheduledDecode();
     this.updateStateAttribute("paused");
-    connectionManager.sendCommand({
-      type: "pause",
-      id: this.streamId,
-    });
+    if (!connectionManager.hasOtherActiveSubscriber(this.streamId, this)) {
+      connectionManager.sendCommand({
+        type: "pause",
+        id: this.streamId,
+      });
+    }
     // Si quedaron bytes acumulados sin renderizar al pausar, renderizar el estado actual
     if (this.receivedBytes > this.lastDecodedBytes) {
       this.decode();
@@ -624,9 +675,29 @@ export class MxImg extends BaseCanvasClass {
    */
   public decode(): MxImgProgressDetail | null {
     const t0 = typeof performance !== "undefined" ? performance.now() : Date.now();
-    const decoded = this.decoder.decodeToRgba();
+    const cached =
+      this.streamId && this.receivedBytes > 0
+        ? MxImg.decodedFrameCache.get(this.streamId)
+        : undefined;
+
+    let decoded = cached && cached.receivedBytes === this.receivedBytes ? cached.decoded : null;
+
     if (!decoded) {
-      return null;
+      decoded = this.decoder.decodeToRgba();
+      if (!decoded) {
+        return null;
+      }
+      if (this.streamId && this.receivedBytes > 0) {
+        MxImg.decodedFrameCache.set(this.streamId, {
+          receivedBytes: this.receivedBytes,
+          targetBytes: this.targetBytes,
+          totalAssetBytes: this.totalAssetBytes,
+          isComplete: this.state === "completed",
+          decoded,
+        });
+      }
+    } else if (this.state === "completed" && cached && !cached.isComplete) {
+      cached.isComplete = true;
     }
 
     const {

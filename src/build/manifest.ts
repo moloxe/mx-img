@@ -122,6 +122,15 @@ export function resolveManifestEntry(
     return manifest.entriesByHash[byBase];
   }
 
+  // Fallback para nombres con hash de bundler (ej. Astro/Vite `/_astro/castle.D8-To9eN.jpg` -> `castle.jpg`)
+  const unhashedBase = base.replace(/^(.+)\.[a-zA-Z0-9_-]{6,16}(\.[a-zA-Z0-9]+)$/, "$1$2");
+  if (unhashedBase !== base) {
+    const byUnhashed = manifest.hashBySource[unhashedBase];
+    if (byUnhashed && manifest.entriesByHash[byUnhashed]) {
+      return manifest.entriesByHash[byUnhashed];
+    }
+  }
+
   return undefined;
 }
 
