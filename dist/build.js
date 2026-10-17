@@ -726,6 +726,13 @@ function transformHtmlForMxImg(html, manifest, options = {}) {
     replacedCount++;
     return `<canvas${updatedAttrs}></canvas>`;
   });
+  if (outputTag === "canvas") {
+    const compiledJsxRegex = /\(([\s]*)(["'])mx-img\2(\s*,\s*\{)(?!\s*is\s*:)/g;
+    result = result.replace(compiledJsxRegex, (_fullMatch, leadingWs, quote, commaBrace) => {
+      replacedCount++;
+      return `(${leadingWs}${quote}canvas${quote}${commaBrace} is: ${quote}mx-img${quote}, `;
+    });
+  }
   return { html: result, replacedCount };
 }
 if (false) {}
@@ -1298,7 +1305,8 @@ function mxImgVitePlugin(options = {}) {
       return transformed;
     },
     async transform(code, id) {
-      if (!/\.(html|astro|jsx|tsx|vue|svelte)$/i.test(id)) {
+      const cleanId = id.split("?")[0];
+      if (!/\.(html|astro|jsx|tsx|vue|svelte)$/i.test(cleanId)) {
         return null;
       }
       if (!code.includes("mx-img")) {

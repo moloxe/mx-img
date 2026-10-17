@@ -221,6 +221,18 @@ export function transformHtmlForMxImg(
     return `<canvas${updatedAttrs}></canvas>`;
   });
 
+  // 3. Transformar llamadas JSX ya compiladas por Oxc/esbuild/Babel: `("mx-img", {` -> `("canvas", { is: "mx-img", `
+  if (outputTag === "canvas") {
+    const compiledJsxRegex = /\(([\s]*)(["'])mx-img\2(\s*,\s*\{)(?!\s*is\s*:)/g;
+    result = result.replace(
+      compiledJsxRegex,
+      (_fullMatch, leadingWs: string, quote: string, commaBrace: string) => {
+        replacedCount++;
+        return `(${leadingWs}${quote}canvas${quote}${commaBrace} is: ${quote}mx-img${quote}, `;
+      }
+    );
+  }
+
   return { html: result, replacedCount };
 }
 

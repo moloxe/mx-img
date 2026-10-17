@@ -134,7 +134,8 @@ export function mxImgVitePlugin(options: MxImgVitePluginOptions = {}): VitePlugi
     },
 
     async transform(code, id) {
-      if (!/\.(html|astro|jsx|tsx|vue|svelte)$/i.test(id)) {
+      const cleanId = id.split("?")[0];
+      if (!/\.(html|astro|jsx|tsx|vue|svelte)$/i.test(cleanId)) {
         return null;
       }
       if (!code.includes("mx-img")) {

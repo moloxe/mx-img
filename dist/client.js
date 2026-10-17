@@ -711,6 +711,18 @@ class StreamConnectionManager {
     }
     return false;
   }
+  getActiveStreamCount() {
+    let count = 0;
+    for (const set of this.subscribers.values()) {
+      for (const el of set) {
+        if (el.getState() === "active") {
+          count++;
+          break;
+        }
+      }
+    }
+    return count;
+  }
   hasActiveSubscribers() {
     for (const set of this.subscribers.values()) {
       for (const el of set) {
@@ -813,6 +825,7 @@ class MxImg extends BaseCanvasClass {
   static get observedAttributes() {
     return ["src", "data-max-percent", "max-percent", "data-offset-bytes"];
   }
+  static sharedDecoders = new Map;
   static decodedFrameCache = new Map;
   decoder = new ProgressiveFourierDecoder;
   state = "sleeping";
@@ -827,6 +840,18 @@ class MxImg extends BaseCanvasClass {
   lastDecodeMs = 0;
   lastDecodedBytes = 0;
   lastDecodeTimestamp = 0;
+  get src() {
+    return typeof this.getAttribute === "function" ? this.getAttribute("src") ?? "" : "";
+  }
+  set src(value) {
+    if (typeof this.setAttribute !== "function")
+      return;
+    if (value === null || value === undefined || value === "") {
+      this.removeAttribute("src");
+    } else {
+      this.setAttribute("src", String(value));
+    }
+  }
   connectedCallback() {
     if (typeof this.hasAttribute === "function" && !this.hasAttribute("is")) {
       this.setAttribute("is", "mx-img");
@@ -920,6 +945,7 @@ class MxImg extends BaseCanvasClass {
     if (customOffsetBytes !== undefined && customOffsetBytes >= 0) {
       this.receivedBytes = customOffsetBytes;
       MxImg.decodedFrameCache.delete(this.streamId);
+      MxImg.sharedDecoders.delete(this.streamId);
     } else {
       const cached = MxImg.decodedFrameCache.get(this.streamId);
       if (cached && cached.isComplete && this.getMaxPercent() === undefined) {
@@ -980,14 +1006,32 @@ class MxImg extends BaseCanvasClass {
     }
   }
   receiveChunkFrame(frame) {
-    if (frame.embeddedHeader) {
-      this.decoder.appendChunk(frame.embeddedHeader, 0, frame.totalAssetBytes);
+    const streamKey = this.streamId || frame.id;
+    let activeDecoder = this.decoder;
+    if (streamKey) {
+      let shared = MxImg.sharedDecoders.get(streamKey);
+      if (!shared || frame.offsetBytes === 0 && shared.deliveredBytes > 0) {
+        shared = { decoder: new ProgressiveFourierDecoder, deliveredBytes: 0 };
+        MxImg.sharedDecoders.set(streamKey, shared);
+      }
+      if (frame.deliveredBytes > shared.deliveredBytes) {
+        if (frame.embeddedHeader) {
+          shared.decoder.appendChunk(frame.embeddedHeader, 0, frame.totalAssetBytes);
+        }
+        shared.decoder.appendChunk(frame.payload, frame.offsetBytes, frame.totalAssetBytes);
+        shared.deliveredBytes = frame.deliveredBytes;
+      }
+      activeDecoder = shared.decoder;
+    } else {
+      if (frame.embeddedHeader) {
+        this.decoder.appendChunk(frame.embeddedHeader, 0, frame.totalAssetBytes);
+      }
+      this.decoder.appendChunk(frame.payload, frame.offsetBytes, frame.totalAssetBytes);
     }
-    this.decoder.appendChunk(frame.payload, frame.offsetBytes, frame.totalAssetBytes);
     this.receivedBytes = frame.deliveredBytes;
     this.targetBytes = frame.targetBytes;
     this.totalAssetBytes = frame.totalAssetBytes;
-    const header = this.decoder.getHeader();
+    const header = activeDecoder.getHeader();
     if (header) {
       if (this.width !== header.width)
         this.width = header.width;
@@ -995,7 +1039,7 @@ class MxImg extends BaseCanvasClass {
         this.height = header.height;
     }
     const progressPercent = this.targetBytes > 0 ? Math.min(100, this.receivedBytes / this.targetBytes * 100) : 0;
-    const injected = this.decoder.getInjectedCoefficients();
+    const injected = activeDecoder.getInjectedCoefficients();
     const totalCoeffs = header?.numCoefficients ?? 0;
     const kCroma = header?.kCroma ?? 1;
     const chromaPercent = Math.min(100, Math.min(kCroma, Math.floor(injected / 3)) / kCroma * 100);
@@ -1021,11 +1065,14 @@ class MxImg extends BaseCanvasClass {
     }
     const now = typeof performance !== "undefined" ? performance.now() : Date.now();
     const isFirstRender = this.lastDecodedBytes === 0;
+    const activeStreams = Math.max(1, connectionManager.getActiveStreamCount());
+    const cachedFftMs = this.streamId && MxImg.decodedFrameCache.get(this.streamId)?.fftDurationMs || this.lastDecodeMs;
+    const minIntervalMs = Math.max(220, Math.min(1200, cachedFftMs * activeStreams * 1.5));
     const elapsedSinceLastDecode = now - this.lastDecodeTimestamp;
-    if (isFirstRender || elapsedSinceLastDecode >= 220) {
+    if (isFirstRender || elapsedSinceLastDecode >= minIntervalMs) {
       this.scheduleDecodeRender(0);
     } else if (this.decodeTimerId === null && this.rafDecodeId === null) {
-      this.scheduleDecodeRender(220 - elapsedSinceLastDecode);
+      this.scheduleDecodeRender(minIntervalMs - elapsedSinceLastDecode);
     }
   }
   scheduleDecodeRender(delayMs) {
@@ -1055,18 +1102,24 @@ class MxImg extends BaseCanvasClass {
   decode() {
     const t0 = typeof performance !== "undefined" ? performance.now() : Date.now();
     const cached = this.streamId && this.receivedBytes > 0 ? MxImg.decodedFrameCache.get(this.streamId) : undefined;
-    let decoded = cached && cached.receivedBytes === this.receivedBytes ? cached.decoded : null;
+    const canReuseCached = cached !== undefined && (cached.receivedBytes === this.receivedBytes || this.state !== "completed" && cached.receivedBytes >= this.lastDecodedBytes && t0 - cached.timestamp < 220);
+    let decoded = canReuseCached ? cached.decoded : null;
     if (!decoded) {
-      decoded = this.decoder.decodeToRgba();
+      const activeDecoder = this.streamId && MxImg.sharedDecoders.get(this.streamId)?.decoder || this.decoder;
+      decoded = activeDecoder.decodeToRgba();
       if (!decoded) {
         return null;
       }
+      const tFftEnd = typeof performance !== "undefined" ? performance.now() : Date.now();
+      const fftDurationMs = tFftEnd - t0;
       if (this.streamId && this.receivedBytes > 0) {
         MxImg.decodedFrameCache.set(this.streamId, {
           receivedBytes: this.receivedBytes,
           targetBytes: this.targetBytes,
           totalAssetBytes: this.totalAssetBytes,
           isComplete: this.state === "completed",
+          timestamp: tFftEnd,
+          fftDurationMs,
           decoded
         });
       }

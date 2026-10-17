@@ -233,6 +233,19 @@ class StreamConnectionManager {
     return false;
   }
 
+  public getActiveStreamCount(): number {
+    let count = 0;
+    for (const set of this.subscribers.values()) {
+      for (const el of set) {
+        if (el.getState() === "active") {
+          count++;
+          break;
+        }
+      }
+    }
+    return count;
+  }
+
   private hasActiveSubscribers(): boolean {
     for (const set of this.subscribers.values()) {
       for (const el of set) {
@@ -369,6 +382,14 @@ export class MxImg extends BaseCanvasClass {
     return ["src", "data-max-percent", "max-percent", "data-offset-bytes"];
   }
 
+  private static sharedDecoders = new Map<
+    string,
+    {
+      decoder: ProgressiveFourierDecoder;
+      deliveredBytes: number;
+    }
+  >();
+
   private static decodedFrameCache = new Map<
     string,
     {
@@ -376,6 +397,8 @@ export class MxImg extends BaseCanvasClass {
       targetBytes: number;
       totalAssetBytes: number;
       isComplete: boolean;
+      timestamp: number;
+      fftDurationMs: number;
       decoded: NonNullable<ReturnType<ProgressiveFourierDecoder["decodeToRgba"]>>;
     }
   >();
@@ -393,6 +416,19 @@ export class MxImg extends BaseCanvasClass {
   private lastDecodeMs = 0;
   private lastDecodedBytes = 0;
   private lastDecodeTimestamp = 0;
+
+  public get src(): string {
+    return typeof this.getAttribute === "function" ? (this.getAttribute("src") ?? "") : "";
+  }
+
+  public set src(value: string) {
+    if (typeof this.setAttribute !== "function") return;
+    if (value === null || value === undefined || value === "") {
+      this.removeAttribute("src");
+    } else {
+      this.setAttribute("src", String(value));
+    }
+  }
 
   public connectedCallback(): void {
     if (typeof this.hasAttribute === "function" && !this.hasAttribute("is")) {
@@ -511,6 +547,7 @@ export class MxImg extends BaseCanvasClass {
     if (customOffsetBytes !== undefined && customOffsetBytes >= 0) {
       this.receivedBytes = customOffsetBytes;
       MxImg.decodedFrameCache.delete(this.streamId);
+      MxImg.sharedDecoders.delete(this.streamId);
     } else {
       const cached = MxImg.decodedFrameCache.get(this.streamId);
       if (cached && cached.isComplete && this.getMaxPercent() === undefined) {
@@ -584,16 +621,35 @@ export class MxImg extends BaseCanvasClass {
    * y programa/ejecuta la fase de decodificación sobre el `<canvas>`.
    */
   public receiveChunkFrame(frame: MxImgServerChunkFrame): void {
-    if (frame.embeddedHeader) {
-      this.decoder.appendChunk(frame.embeddedHeader, 0, frame.totalAssetBytes);
+    const streamKey = this.streamId || frame.id;
+    let activeDecoder = this.decoder;
+
+    if (streamKey) {
+      let shared = MxImg.sharedDecoders.get(streamKey);
+      if (!shared || (frame.offsetBytes === 0 && shared.deliveredBytes > 0)) {
+        shared = { decoder: new ProgressiveFourierDecoder(), deliveredBytes: 0 };
+        MxImg.sharedDecoders.set(streamKey, shared);
+      }
+      if (frame.deliveredBytes > shared.deliveredBytes) {
+        if (frame.embeddedHeader) {
+          shared.decoder.appendChunk(frame.embeddedHeader, 0, frame.totalAssetBytes);
+        }
+        shared.decoder.appendChunk(frame.payload, frame.offsetBytes, frame.totalAssetBytes);
+        shared.deliveredBytes = frame.deliveredBytes;
+      }
+      activeDecoder = shared.decoder;
+    } else {
+      if (frame.embeddedHeader) {
+        this.decoder.appendChunk(frame.embeddedHeader, 0, frame.totalAssetBytes);
+      }
+      this.decoder.appendChunk(frame.payload, frame.offsetBytes, frame.totalAssetBytes);
     }
 
-    this.decoder.appendChunk(frame.payload, frame.offsetBytes, frame.totalAssetBytes);
     this.receivedBytes = frame.deliveredBytes;
     this.targetBytes = frame.targetBytes;
     this.totalAssetBytes = frame.totalAssetBytes;
 
-    const header = this.decoder.getHeader();
+    const header = activeDecoder.getHeader();
     if (header) {
       if (this.width !== header.width) this.width = header.width;
       if (this.height !== header.height) this.height = header.height;
@@ -602,7 +658,7 @@ export class MxImg extends BaseCanvasClass {
     // Notificar progreso de transferencia en cada porción de 100 KB
     const progressPercent =
       this.targetBytes > 0 ? Math.min(100, (this.receivedBytes / this.targetBytes) * 100) : 0;
-    const injected = this.decoder.getInjectedCoefficients();
+    const injected = activeDecoder.getInjectedCoefficients();
     const totalCoeffs = header?.numCoefficients ?? 0;
     const kCroma = header?.kCroma ?? 1;
     const chromaPercent = Math.min(
@@ -634,12 +690,17 @@ export class MxImg extends BaseCanvasClass {
 
     const now = typeof performance !== "undefined" ? performance.now() : Date.now();
     const isFirstRender = this.lastDecodedBytes === 0;
+    const activeStreams = Math.max(1, connectionManager.getActiveStreamCount());
+    const cachedFftMs =
+      (this.streamId && MxImg.decodedFrameCache.get(this.streamId)?.fftDurationMs) ||
+      this.lastDecodeMs;
+    const minIntervalMs = Math.max(220, Math.min(1200, cachedFftMs * activeStreams * 1.5));
     const elapsedSinceLastDecode = now - this.lastDecodeTimestamp;
 
-    if (isFirstRender || elapsedSinceLastDecode >= 220) {
+    if (isFirstRender || elapsedSinceLastDecode >= minIntervalMs) {
       this.scheduleDecodeRender(0);
     } else if (this.decodeTimerId === null && this.rafDecodeId === null) {
-      this.scheduleDecodeRender(220 - elapsedSinceLastDecode);
+      this.scheduleDecodeRender(minIntervalMs - elapsedSinceLastDecode);
     }
   }
 
@@ -680,19 +741,32 @@ export class MxImg extends BaseCanvasClass {
         ? MxImg.decodedFrameCache.get(this.streamId)
         : undefined;
 
-    let decoded = cached && cached.receivedBytes === this.receivedBytes ? cached.decoded : null;
+    const canReuseCached =
+      cached !== undefined &&
+      (cached.receivedBytes === this.receivedBytes ||
+        (this.state !== "completed" &&
+          cached.receivedBytes >= this.lastDecodedBytes &&
+          t0 - cached.timestamp < 220));
+
+    let decoded = canReuseCached ? cached.decoded : null;
 
     if (!decoded) {
-      decoded = this.decoder.decodeToRgba();
+      const activeDecoder =
+        (this.streamId && MxImg.sharedDecoders.get(this.streamId)?.decoder) || this.decoder;
+      decoded = activeDecoder.decodeToRgba();
       if (!decoded) {
         return null;
       }
+      const tFftEnd = typeof performance !== "undefined" ? performance.now() : Date.now();
+      const fftDurationMs = tFftEnd - t0;
       if (this.streamId && this.receivedBytes > 0) {
         MxImg.decodedFrameCache.set(this.streamId, {
           receivedBytes: this.receivedBytes,
           targetBytes: this.targetBytes,
           totalAssetBytes: this.totalAssetBytes,
           isComplete: this.state === "completed",
+          timestamp: tFftEnd,
+          fftDurationMs,
           decoded,
         });
       }
