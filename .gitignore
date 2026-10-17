@@ -19,6 +19,6 @@ experiments/scratch/
 
 # Bun / Node
 node_modules/
-dist/
+dist/.mx-img/
 *.tsbuildinfo
 

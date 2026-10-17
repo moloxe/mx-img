@@ -1,16 +1,48 @@
 {
   "name": "mx-img",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Progressive Fourier spectrum image encoder, decoder, and streaming custom element (<mx-img />)",
+  "license": "MIT",
   "type": "module",
-  "module": "src/index.ts",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./src/index.ts",
-    "./client": "./src/client/lib/index.ts",
-    "./server": "./src/server/index.ts",
-    "./build": "./src/build/index.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./client": {
+      "types": "./dist/client.d.ts",
+      "import": "./dist/client.js",
+      "default": "./dist/client.js"
+    },
+    "./server": {
+      "types": "./dist/server.d.ts",
+      "import": "./dist/server.js",
+      "default": "./dist/server.js"
+    },
+    "./build": {
+      "types": "./dist/build.d.ts",
+      "import": "./dist/build.js",
+      "default": "./dist/build.js"
+    }
+  },
+  "files": [
+    "dist/*.js",
+    "dist/*.d.ts",
+    "dist/types",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "bun": ">=1.1.0"
   },
   "scripts": {
+    "build": "bun run scripts/build-lib.ts",
+    "prepare": "bun run build",
     "test": "bun test",
     "encode": "bun run src/utils/encoding/encoder.ts",
     "decode": "bun run src/utils/encoding/decoder.ts",

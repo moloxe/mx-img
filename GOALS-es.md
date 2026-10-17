@@ -15,7 +15,7 @@ Construcción:
 
 ### Fase 1: encoder y decoder
 
-Se usará lo construido en `experiments/notebooks/2026-10-new-format-03.ipynb` en un proyecto que funcione con el runtime de node bun (se traducirá el código con herramientas equivalentes y eficientes).
+Se usará lo construido en `experiments/notebooks/2026-10-new-format-03.ipynb` en un proyecto que funcione con el runtime de bun (se traducirá el código con herramientas equivalentes y eficientes).
 Se debe tener un script en `/src/utils/encoding/encoder.ts` y `/src/utils/encoding/decoder.ts`.
 No es mandatorio que todo esté allí, lo necesario puede distribuirse en el resto del proyecto para bun en `/src`.
 Debe existir un test para validar el funcionamiento con `src/assets/images/periodic-surface.jpeg`.
@@ -49,7 +49,7 @@ Se debe crear una librería `src/client/lib/index.ts` que registre un Custom Ele
 El cliente debe importar las librerías para la configuración inicial y la ubicación del servidor:
 
 ```ts
-import { init } from "mx-img";
+import { init } from "mx-img/client";
 init({
   streamUrl: "http://localhost:8080/.mx-img/stream",
 });
@@ -67,3 +67,26 @@ Se debe comportar de la siguiente manera:
 Los archivos en `src/client/mockup` deben servir para poder probar en un cliente local la carga de imágenes.
 Debe cargarse en el `index.html` las imágenes en `src/assets`.
 Cargar la librería cliente (no necesariamente importar con `mx-img`, pero si una referencia local a la librería), iniciar la conexión y funcionar como se esperaría con el Custom Element `mx-img`
+
+### Fase 3: lib bundles para proyectos de astro
+
+#### Bundle
+
+Dado que este proyecto no se publicará en npm y está diseñado exclusivamente para el runtime de Bun por rendimiento, se debe poder instalar de forma manual de la siguiente manera:
+Protocolo Git directo (bun): `bun add github:moloxe/mx-img`
+
+La importación se divide en 3 subpaths explícitos:
+
+- Build (Astro / Vite): `import { mxImgAstroIntegration, mxImgVitePlugin } from 'mx-img/build'`
+- Servidor (Streaming en Bun): `import { createMxImgStreamServer } from 'mx-img/server'`
+- Cliente (Browser): `import { init } from 'mx-img/client'`
+
+#### README.md
+
+Deberás mantener el README.md sincronizado para que los devs puedan implementar de forma sencilla.
+
+Mantenlo corto con una descripción, una breve justificación de performance del uso exclusivo de Bun y los pasos mínimos para su implementación.
+
+Debe mantenerse siempre en inglés.
+
+También añade una licencia de uso libre (MIT) y descargo de responsabilidad.
