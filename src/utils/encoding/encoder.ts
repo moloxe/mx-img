@@ -100,7 +100,7 @@ export async function encodeImageFromFile(
 
 // Ejecución directa como script desde CLI: `bun src/utils/encoding/encoder.ts [imgPath] [umbral] [outPath]`
 if (import.meta.main) {
-  const defaultImgPath = resolve(import.meta.dir, "../../assets/images/image.jpeg");
+  const defaultImgPath = resolve(import.meta.dir, "../../assets/images/periodic-surface.jpeg");
   const imgPath = process.argv[2] ? resolve(process.argv[2]) : defaultImgPath;
   const umbral = process.argv[3] ? Number.parseFloat(process.argv[3]) : 0.15;
   const outputBinPath = process.argv[4] ? resolve(process.argv[4]) : undefined;

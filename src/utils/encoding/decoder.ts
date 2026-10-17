@@ -180,7 +180,7 @@ export const decode_fourier_color_progresivo = decodeFourierColorProgressive;
 // Ejecución directa como script desde CLI:
 // `bun src/utils/encoding/decoder.ts [inputPath] [porcentaje] [outputImgPath]`
 if (import.meta.main) {
-  const defaultImgPath = resolve(import.meta.dir, "../../assets/images/image.jpeg");
+  const defaultImgPath = resolve(import.meta.dir, "../../assets/images/periodic-surface.jpeg");
   const inputPath = process.argv[2] ? resolve(process.argv[2]) : defaultImgPath;
   const pctArg = process.argv[3] ? Number.parseFloat(process.argv[3]) : undefined;
   const outputImgPath = process.argv[4] ? resolve(process.argv[4]) : undefined;

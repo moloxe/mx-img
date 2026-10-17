@@ -16,7 +16,7 @@ import {
   ycbcrToRgb,
 } from "../index.ts";
 
-const IMAGE_PATH = resolve(import.meta.dir, "../../../assets/images/image.jpeg");
+const IMAGE_PATH = resolve(import.meta.dir, "../../../assets/images/periodic-surface.jpeg");
 
 describe("MxImg Fase 1: Encoder y Decoder Espectral 1D (YCbCr)", () => {
   let imgRgb: RawRgbImage;
@@ -27,7 +27,7 @@ describe("MxImg Fase 1: Encoder y Decoder Espectral 1D (YCbCr)", () => {
     encodedPerceptual = encodeFourierColor1D(imgRgb, 0.15);
   });
 
-  test("1. Carga correctamente src/assets/images/image.jpeg en formato RGB (800x780x3)", () => {
+  test("1. Carga correctamente src/assets/images/periodic-surface.jpeg en formato RGB (800x780x3)", () => {
     expect(imgRgb.width).toBe(800);
     expect(imgRgb.height).toBe(780);
     expect(imgRgb.channels).toBe(3);
