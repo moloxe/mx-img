@@ -1,6 +1,6 @@
 # Entorno de Experimentación - Fourier Image Processing (`experiments/`)
 
-Este entorno está configurado para la experimentación, análisis y simulación de transmisión progresiva de imágenes mediante el espectro de Fourier (2D FFT / IFFT) para el proyecto **`<mx-img />`** (según [GOALS-es.md](file:///Users/francomolochegarcia/dev/mx-img/GOALS-es.md)).
+Este entorno está configurado para la experimentación, análisis y simulación de transmisión progresiva de imágenes mediante el espectro de Fourier (2D FFT / IFFT) para el proyecto **`<mx-img />`** (según [GOALS-es.md](../GOALS-es.md)).
 
 ---
 
@@ -12,8 +12,9 @@ Este entorno está configurado para la experimentación, análisis y simulación
 
 ## 2. Configuración y Creación del Entorno Virtual
 
-Si necesitas recrear el entorno desde cero dentro de `experiments/`:
+El entorno principal se aloja en `experiments/.venv`.
 
+### Opción A: Desde el directorio `experiments/` (Recomendado)
 ```bash
 cd /Users/francomolochegarcia/dev/mx-img/experiments
 
@@ -23,45 +24,47 @@ python3 -m venv .venv
 # 2. Actualizar pip e instalar dependencias
 ./.venv/bin/pip install --upgrade pip
 ./.venv/bin/pip install -r requirements.txt
+
+# 3. Registrar el kernel en Jupyter
+./.venv/bin/python -m ipykernel install --user --name mx-img-experiments --display-name "Python (mx-img-experiments)"
 ```
 
-### Paquetes incluidos (`requirements.txt`):
+### Opción B: Si estás en la raíz del repositorio (`mx-img/`)
+```bash
+cd /Users/francomolochegarcia/dev/mx-img
 
-- `numpy`: Manipulación matricial y operaciones con tensores.
-- `scipy`: FFT 2D y transformadas avanzadas (`scipy.fft`).
-- `pillow` y `opencv-python-headless`: Carga, manipulación y conversión de imágenes.
-- `matplotlib`: Visualización de espectro de magnitud, fase y reconstrucciones progresivas.
-- `jupyterlab` / `notebook` / `ipywidgets`: Entorno interactivo y sliders interactivos para simular el streaming de coeficientes/frecuencias.
+# Instalar dependencias usando el requirements de la raíz
+./experiments/.venv/bin/pip install -r requirements.txt
+```
 
 ---
 
 ## 3. Iniciar Jupyter Notebook / JupyterLab
 
-Para iniciar el servidor de Jupyter:
-
+### En la terminal:
 ```bash
 cd /Users/francomolochegarcia/dev/mx-img/experiments
-
-# Activar el entorno virtual
 source .venv/bin/activate
-
-# Iniciar Jupyter Lab
 jupyter lab
-
-# O si prefieres Jupyter Notebook clásico:
-# jupyter notebook
 ```
 
-Alternativamente, sin activar manualmente el entorno en tu shell:
-
+### Directamente con el binario del entorno:
 ```bash
 /Users/francomolochegarcia/dev/mx-img/experiments/.venv/bin/jupyter lab
 ```
 
+### Si abres los cuadernos desde VS Code / Antigravity IDE:
+Selecciona el kernel de Jupyter:
+- **`Python (mx-img-experiments)`** o el intérprete en `/Users/francomolochegarcia/dev/mx-img/experiments/.venv/bin/python`.
+
 ---
 
-## 4. Estructura de Trabajo Sugerida en `experiments/`
+## 4. Cuadernos de Experimentación Disponibles
 
-- `notebooks/`: Cuadernos `.ipynb` de pruebas (ej. filtrado paso bajo progresivo, compresión de coeficientes, streaming por paquetes de frecuencias).
-- `data/` o `sample_images/`: Imágenes de prueba (ej. patrones de alta/baja frecuencia, fotografías, texturas).
-- `src/`: Funciones auxiliares modulares en Python que luego puedan adaptarse a la arquitectura final o servir de referencia para el cliente/servidor.
+- **[2026-10.ipynb](notebooks/2026-10.ipynb)**: Experimento de corte circular en el espectro de Fourier (2D-FFT / 2D-IFFT).
+  - **Stage 1:** Muestra la imagen original (`images/image.jpeg`).
+  - **Stage 2:** Muestra su espectro de Fourier centrado en escala logarítmica.
+  - **Stage 3:** Muestra la máscara del corte circular (filtro paso bajo).
+  - **Stage 4:** Muestra el espectro cortado con contorno blanco del radio y métricas de retención de energía.
+  - **Stage 5:** Reconstruye la imagen espacial mediante IFFT comparada con la original.
+  - **Stage Interactivo:** Réplica en cuadrícula 2x2 con slider dinámico de radio en tiempo real.

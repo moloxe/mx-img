@@ -1,0 +1,2 @@
+# Requirements para el entorno de desarrollo y experimentos de mx-img
+-r experiments/requirements.txt
