@@ -5,6 +5,8 @@ export interface MxImgVitePluginOptions {
     mxImgSubDir?: string;
     /** Umbral de radio cromático (por defecto `0.15`) */
     umbralRadioCroma?: number;
+    /** Tamaño de porción inicial para previsualizaciones en bytes (por defecto 8 KB = 8192) */
+    previewBytes?: number;
     /** Etiqueta de salida tras el build (`"canvas"` con `is="mx-img"` o `"mx-img"`) */
     outputTag?: "canvas" | "mx-img";
 }

@@ -688,9 +688,11 @@ if (false) {}
 
 // src/build/builder.ts
 var SUPPORTED_IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp"]);
+var DEFAULT_PREVIEW_BYTES = 8 * 1024;
 async function buildSingleMxImgAsset(imagePath, outDir, manifest, options = {}) {
   const rootDir = options.rootDir ?? process.cwd();
   const umbralRadioCroma = options.umbralRadioCroma ?? 0.15;
+  const previewBytes = options.previewBytes ?? DEFAULT_PREVIEW_BYTES;
   const absPath = resolve(rootDir, imagePath);
   const rawSourceBytes = new Uint8Array(await readFile2(absPath));
   const hash = computeMxImgHash(rawSourceBytes, umbralRadioCroma);
@@ -700,9 +702,12 @@ async function buildSingleMxImgAsset(imagePath, outDir, manifest, options = {}) 
   const baseName = basename2(absPath);
   await mkdir2(outDir, { recursive: true });
   let entry;
+  let binaryBytes;
   if (!options.force && existsSync2(outBinPath)) {
-    const existingBytes = new Uint8Array(await readFile2(outBinPath));
-    const header = parseMxImgHeader(existingBytes);
+    binaryBytes = new Uint8Array(await readFile2(outBinPath));
+    const header = parseMxImgHeader(binaryBytes);
+    const chunkLen = Math.min(previewBytes, binaryBytes.byteLength);
+    const initialChunkBase64 = Buffer.from(binaryBytes.subarray(0, chunkLen)).toString("base64");
     entry = {
       hash,
       fileName,
@@ -710,15 +715,19 @@ async function buildSingleMxImgAsset(imagePath, outDir, manifest, options = {}) 
       baseName,
       width: header.width,
       height: header.height,
-      totalBytes: existingBytes.byteLength,
+      totalBytes: binaryBytes.byteLength,
       numCoefficients: header.numCoefficients,
       kCroma: header.kCroma,
-      umbralRadioCroma: header.umbralRadioCroma
+      umbralRadioCroma: header.umbralRadioCroma,
+      initialChunkBase64,
+      initialChunkBytes: chunkLen
     };
   } else {
     const { encoded } = await encodeImageFromFile(absPath, umbralRadioCroma);
-    const binary = serializeFourierStream(encoded);
-    await writeFile2(outBinPath, binary);
+    binaryBytes = serializeFourierStream(encoded);
+    await writeFile2(outBinPath, binaryBytes);
+    const chunkLen = Math.min(previewBytes, binaryBytes.byteLength);
+    const initialChunkBase64 = Buffer.from(binaryBytes.subarray(0, chunkLen)).toString("base64");
     entry = {
       hash,
       fileName,
@@ -726,10 +735,12 @@ async function buildSingleMxImgAsset(imagePath, outDir, manifest, options = {}) 
       baseName,
       width: encoded.dims[1],
       height: encoded.dims[0],
-      totalBytes: binary.byteLength,
+      totalBytes: binaryBytes.byteLength,
       numCoefficients: encoded.numCoefficients,
       kCroma: encoded.kCroma,
-      umbralRadioCroma: encoded.umbralRadioCroma
+      umbralRadioCroma: encoded.umbralRadioCroma,
+      initialChunkBase64,
+      initialChunkBytes: chunkLen
     };
   }
   registerManifestEntry(manifest, entry, options.aliases ?? []);
@@ -739,6 +750,7 @@ async function buildMxImgAssets(options = {}) {
   const rootDir = resolve(options.rootDir ?? process.cwd());
   const outDir = resolve(rootDir, options.outDir ?? "dist/.mx-img");
   const umbralRadioCroma = options.umbralRadioCroma ?? 0.15;
+  const previewBytes = options.previewBytes ?? DEFAULT_PREVIEW_BYTES;
   await mkdir2(outDir, { recursive: true });
   const manifest = await loadManifest(outDir);
   let targetFiles = [];
@@ -756,6 +768,7 @@ async function buildMxImgAssets(options = {}) {
     const entry = await buildSingleMxImgAsset(filePath, outDir, manifest, {
       rootDir,
       umbralRadioCroma,
+      previewBytes,
       force: options.force
     });
     entries.push(entry);
@@ -834,6 +847,61 @@ function transformHtmlForMxImg(html, manifest, options = {}) {
     });
   }
   return { html: result, replacedCount };
+}
+function injectMxImgPreviews(html, manifest) {
+  if (html.includes("data-mx-img-previews")) {
+    return { html, injectedCount: 0 };
+  }
+  const previews = {};
+  const aliases = {};
+  const candidateRefs = new Set;
+  const tagRegex = /<(?:mx-img|canvas\b[^>]*?\bis\s*=\s*["']mx-img["'])[^>]*?\bsrc\s*=\s*["']([^"']+)["'][^>]*?>/gi;
+  for (const match of html.matchAll(tagRegex)) {
+    if (match[1])
+      candidateRefs.add(match[1]);
+  }
+  const imgPathRegex = /(?:["'/\s&;]|&quot;)([a-zA-Z0-9_\-\.\/]+?\.(?:jpe?g|png|webp))(?:\b|["'/\s&;]|&quot;)/gi;
+  for (const match of html.matchAll(imgPathRegex)) {
+    if (match[1])
+      candidateRefs.add(match[1]);
+  }
+  const hashRegex = /\b([a-f0-9]{12})\b/g;
+  for (const match of html.matchAll(hashRegex)) {
+    if (manifest.entriesByHash[match[1]]) {
+      candidateRefs.add(match[1]);
+    }
+  }
+  for (const ref of candidateRefs) {
+    const entry = resolveManifestEntry(manifest, ref);
+    if (!entry)
+      continue;
+    if (entry.initialChunkBase64 && entry.initialChunkBytes) {
+      previews[entry.hash] = {
+        b64: entry.initialChunkBase64,
+        bytes: entry.initialChunkBytes,
+        total: entry.totalBytes
+      };
+      aliases[ref] = entry.hash;
+      aliases[entry.hash] = entry.hash;
+      aliases[entry.baseName] = entry.hash;
+      if (entry.sourcePath) {
+        aliases[entry.sourcePath] = entry.hash;
+      }
+    }
+  }
+  const injectedCount = Object.keys(previews).length;
+  if (injectedCount === 0) {
+    return { html, injectedCount: 0 };
+  }
+  const payload = { previews, aliases };
+  const scriptTag = `<script type="application/json" data-mx-img-previews>${JSON.stringify(payload)}</script>`;
+  let updatedHtml = html;
+  if (/<\/body>/i.test(updatedHtml)) {
+    updatedHtml = updatedHtml.replace(/<\/body>/i, `${scriptTag}</body>`);
+  } else {
+    updatedHtml += scriptTag;
+  }
+  return { html: updatedHtml, injectedCount };
 }
 if (false) {}
 // src/build/vite-plugin.ts
@@ -1392,7 +1460,8 @@ function mxImgVitePlugin(options = {}) {
         rootDir,
         inputDir: options.assetsDir ?? "src/assets/images",
         outDir,
-        umbralRadioCroma
+        umbralRadioCroma,
+        previewBytes: options.previewBytes
       });
       manifest = built.manifest;
     },
@@ -1402,7 +1471,8 @@ function mxImgVitePlugin(options = {}) {
       const { html: transformed } = transformHtmlForMxImg(html, manifest, {
         outputTag: options.outputTag ?? "canvas"
       });
-      return transformed;
+      const { html: withPreviews } = injectMxImgPreviews(transformed, manifest);
+      return withPreviews;
     },
     async transform(code, id) {
       const cleanId = id.split("?")[0];
@@ -1477,7 +1547,8 @@ function mxImgAstroIntegration(options = {}) {
           rootDir,
           inputDir: options.assetsDir ?? "src/assets/images",
           outDir: primaryMxImgDir,
-          umbralRadioCroma: options.umbralRadioCroma ?? 0.15
+          umbralRadioCroma: options.umbralRadioCroma ?? 0.15,
+          previewBytes: options.previewBytes
         });
         if (existsSync5(buildOutPath)) {
           const allBuiltFiles = await readdir2(buildOutPath, { recursive: true });
@@ -1485,12 +1556,22 @@ function mxImgAstroIntegration(options = {}) {
             const relStr = String(rel);
             if (relStr.endsWith(".html")) {
               const htmlPath = join5(buildOutPath, relStr);
-              const rawHtml = await readFile4(htmlPath, "utf8");
-              if (rawHtml.includes("mx-img")) {
-                const { html: updatedHtml, replacedCount } = transformHtmlForMxImg(rawHtml, manifest, { outputTag: options.outputTag ?? "canvas" });
+              let currentHtml = await readFile4(htmlPath, "utf8");
+              let fileChanged = false;
+              if (currentHtml.includes("mx-img")) {
+                const { html: updatedHtml, replacedCount } = transformHtmlForMxImg(currentHtml, manifest, { outputTag: options.outputTag ?? "canvas" });
                 if (replacedCount > 0) {
-                  await writeFile3(htmlPath, updatedHtml, "utf8");
+                  currentHtml = updatedHtml;
+                  fileChanged = true;
                 }
+              }
+              const { html: withPreviews, injectedCount } = injectMxImgPreviews(currentHtml, manifest);
+              if (injectedCount > 0) {
+                currentHtml = withPreviews;
+                fileChanged = true;
+              }
+              if (fileChanged) {
+                await writeFile3(htmlPath, currentHtml, "utf8");
               }
             }
           }
@@ -1518,10 +1599,12 @@ __mxImgHook(${JSON.stringify({
   };
 }
 export {
+  DEFAULT_PREVIEW_BYTES,
   buildMxImgAssets,
   buildSingleMxImgAsset,
   computeMxImgHash,
   createEmptyManifest,
+  injectMxImgPreviews,
   loadManifest,
   mxImgAstroIntegration,
   mxImgVitePlugin,

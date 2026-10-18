@@ -48,6 +48,7 @@ class StreamConnectionManager {
   private isConnecting = false;
   private pendingCommands: MxImgClientCommand[] = [];
   private subscribers = new Map<string, Set<MxImg>>();
+  private previews = new Map<string, { b64: string; bytes: number; total: number }>();
   private intersectionObserver: IntersectionObserver | null = null;
   private mutationObserver: MutationObserver | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -63,6 +64,7 @@ class StreamConnectionManager {
       streamUrl: resolvedStreamUrl,
     };
 
+    this.loadPreviews();
     this.setupIntersectionObserver();
     this.setupDomUpgrader();
     this.ensureConnected(prevUrl !== undefined && prevUrl !== resolvedStreamUrl);
@@ -76,6 +78,62 @@ class StreamConnectionManager {
         }
       }
     }
+  }
+
+  public loadPreviews(): void {
+    if (typeof document === "undefined") return;
+    const scriptTags = document.querySelectorAll("script[data-mx-img-previews]");
+    for (const tag of scriptTags) {
+      try {
+        const text = tag.textContent;
+        if (!text) continue;
+        const data = JSON.parse(text) as {
+          previews?: Record<string, { b64: string; bytes: number; total: number }>;
+          aliases?: Record<string, string>;
+        };
+        if (data.previews) {
+          for (const [hash, item] of Object.entries(data.previews)) {
+            this.previews.set(hash, item);
+          }
+        }
+        if (data.aliases && data.previews) {
+          for (const [alias, hash] of Object.entries(data.aliases)) {
+            const item = data.previews[hash];
+            if (item) {
+              this.previews.set(alias, item);
+            }
+          }
+        }
+      } catch (err) {
+        console.warn("[mx-img] Error leyendo data-mx-img-previews:", err);
+      }
+    }
+  }
+
+  public getPreview(idOrSrc: string): { b64: string; bytes: number; total: number } | undefined {
+    if (!idOrSrc) return undefined;
+    if (this.previews.size === 0) {
+      this.loadPreviews();
+    }
+    const trimmed = idOrSrc.trim();
+    if (this.previews.has(trimmed)) {
+      return this.previews.get(trimmed);
+    }
+    const clean = trimmed.split("?")[0].split("#")[0];
+    if (this.previews.has(clean)) {
+      return this.previews.get(clean);
+    }
+    const base = clean.split("/").pop();
+    if (base && this.previews.has(base)) {
+      return this.previews.get(base);
+    }
+    if (base) {
+      const unhashed = base.replace(/^(.+)\.[a-zA-Z0-9_-]{6,16}(\.[a-zA-Z0-9]+)$/, "$1$2");
+      if (unhashed !== base && this.previews.has(unhashed)) {
+        return this.previews.get(unhashed);
+      }
+    }
+    return undefined;
   }
 
   public getConfig(): (Required<Pick<MxImgInitOptions, "streamUrl">> & MxImgInitOptions) | null {
@@ -369,6 +427,16 @@ const BaseCanvasClass: typeof HTMLCanvasElement =
     ? HTMLCanvasElement
     : (class {} as unknown as typeof HTMLCanvasElement);
 
+function base64ToUint8Array(b64: string): Uint8Array {
+  const binaryStr = atob(b64.trim());
+  const len = binaryStr.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryStr.charCodeAt(i);
+  }
+  return bytes;
+}
+
 /**
  * Custom Element `MxImg` que extiende directamente a `HTMLCanvasElement` (`<canvas is="mx-img">`).
  *
@@ -379,7 +447,14 @@ const BaseCanvasClass: typeof HTMLCanvasElement =
  */
 export class MxImg extends BaseCanvasClass {
   static get observedAttributes(): string[] {
-    return ["src", "data-max-percent", "max-percent", "data-offset-bytes"];
+    return [
+      "src",
+      "data-max-percent",
+      "max-percent",
+      "data-offset-bytes",
+      "data-initial-portion",
+      "data-initial-chunk",
+    ];
   }
 
   private static sharedDecoders = new Map<
@@ -501,7 +576,20 @@ export class MxImg extends BaseCanvasClass {
     }
   }
 
-  private resetStreamState(): void {
+  private getDirectInitialPortion(): { b64: string; bytes: number; total: number } | undefined {
+    const raw =
+      this.getAttribute("data-initial-portion") ?? this.getAttribute("data-initial-chunk");
+    if (!raw) return undefined;
+    const totalAttr = this.getAttribute("data-total-bytes");
+    const bytesAttr = this.getAttribute("data-offset-bytes");
+    const b64 = raw.trim();
+    const len = Math.floor((b64.length * 3) / 4);
+    const bytes = bytesAttr ? Number.parseInt(bytesAttr, 10) : len;
+    const total = totalAttr ? Number.parseInt(totalAttr, 10) : bytes;
+    return { b64, bytes, total };
+  }
+
+  public resetStreamState(): void {
     this.clearScheduledDecode();
     this.decoder = new ProgressiveFourierDecoder();
     this.state = "sleeping";
@@ -549,6 +637,66 @@ export class MxImg extends BaseCanvasClass {
       MxImg.decodedFrameCache.delete(this.streamId);
       MxImg.sharedDecoders.delete(this.streamId);
     } else {
+      // Cargar previsualización incrustada si aún no tenemos bytes recibidos
+      if (this.receivedBytes === 0) {
+        const preview =
+          connectionManager.getPreview(this.streamId) ?? this.getDirectInitialPortion();
+        if (preview && preview.b64) {
+          try {
+            const bytes = base64ToUint8Array(preview.b64);
+            const streamKey = this.streamId;
+            let activeDecoder = this.decoder;
+
+            if (streamKey) {
+              let shared = MxImg.sharedDecoders.get(streamKey);
+              if (!shared) {
+                shared = { decoder: new ProgressiveFourierDecoder(), deliveredBytes: 0 };
+                MxImg.sharedDecoders.set(streamKey, shared);
+              }
+              if (bytes.byteLength > shared.deliveredBytes) {
+                shared.decoder.appendChunk(bytes, 0, preview.total);
+                shared.deliveredBytes = bytes.byteLength;
+              }
+              activeDecoder = shared.decoder;
+            } else {
+              this.decoder.appendChunk(bytes, 0, preview.total);
+            }
+
+            this.receivedBytes = bytes.byteLength;
+            this.totalAssetBytes = preview.total;
+
+            const maxPct = this.getMaxPercent();
+            this.targetBytes =
+              maxPct !== undefined ? Math.floor(preview.total * (maxPct / 100)) : preview.total;
+
+            const header = activeDecoder.getHeader();
+            if (header) {
+              if (this.width !== header.width) this.width = header.width;
+              if (this.height !== header.height) this.height = header.height;
+            }
+
+            // Primer render inmediato sin esperar red
+            this.decode();
+
+            if (this.receivedBytes >= this.targetBytes) {
+              this.clearScheduledDecode();
+              this.updateStateAttribute("completed");
+              return;
+            }
+          } catch (err) {
+            console.warn("[mx-img] Error decodificando preview:", err);
+          }
+        }
+      }
+
+      // Validar que si receivedBytes > 0, el decodificador realmente tenga esos bytes
+      const streamKey = this.streamId;
+      const shared = streamKey ? MxImg.sharedDecoders.get(streamKey) : null;
+      const actualBytes = shared ? shared.deliveredBytes : this.decoder.getReceivedBytes();
+      if (this.receivedBytes > 0 && actualBytes === 0) {
+        this.receivedBytes = 0;
+      }
+
       const cached = MxImg.decodedFrameCache.get(this.streamId);
       if (cached && cached.isComplete && this.getMaxPercent() === undefined) {
         this.receivedBytes = cached.receivedBytes;
@@ -927,4 +1075,9 @@ export function init(options: MxImgInitOptions = {}): void {
 // Registro automático si se carga en navegador
 if (typeof window !== "undefined") {
   registerMxImgElement();
+  if (typeof document !== "undefined") {
+    document.addEventListener("astro:page-load", () => {
+      connectionManager.loadPreviews();
+    });
+  }
 }

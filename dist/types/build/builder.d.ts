@@ -1,4 +1,6 @@
 import { type MxImgManifest, type MxImgManifestEntry } from "./manifest.ts";
+/** Tamaño por defecto de la porción inicial embebida para previsualizaciones: 8 KB (8,192 bytes) */
+export declare const DEFAULT_PREVIEW_BYTES: number;
 export interface BuildMxImgOptions {
     /** Directorio raíz del proyecto (por defecto `process.cwd()`) */
     rootDir?: string;
@@ -10,6 +12,8 @@ export interface BuildMxImgOptions {
     outDir?: string;
     /** Umbral de radio cromático (por defecto `0.15`) */
     umbralRadioCroma?: number;
+    /** Tamaño en bytes de la porción inicial de previsualización (por defecto 8 KB) */
+    previewBytes?: number;
     /** Si es `true`, recodifica aunque el archivo `<hash>.mximg` ya exista en disco */
     force?: boolean;
 }
@@ -22,6 +26,7 @@ export declare function buildSingleMxImgAsset(imagePath: string, outDir: string,
     umbralRadioCroma?: number;
     force?: boolean;
     aliases?: string[];
+    previewBytes?: number;
 }): Promise<MxImgManifestEntry>;
 /**
  * Procesa todas las imágenes del directorio de entrada (o lista de archivos) y genera
@@ -43,4 +48,22 @@ export declare function transformHtmlForMxImg(html: string, manifest: MxImgManif
 }): {
     html: string;
     replacedCount: number;
+};
+export interface MxImgPreviewItem {
+    b64: string;
+    bytes: number;
+    total: number;
+}
+export interface MxImgPreviewsPayload {
+    previews: Record<string, MxImgPreviewItem>;
+    aliases: Record<string, string>;
+}
+/**
+ * Inyecta un bloque `<script type="application/json" data-mx-img-previews>` antes de `</body>`
+ * con el mapa consolidado de porciones iniciales (en base64) de todas las imágenes referenciadas
+ * en el documento HTML (tags `<mx-img>`, `<canvas is="mx-img">` y props de islas hidratadas).
+ */
+export declare function injectMxImgPreviews(html: string, manifest: MxImgManifest): {
+    html: string;
+    injectedCount: number;
 };

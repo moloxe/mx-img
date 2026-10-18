@@ -44,10 +44,13 @@ export default defineConfig({
   integrations: [
     mxImgAstroIntegration({
       assetsDir: "src/assets/images",
+      previewBytes: 8 * 1024, // Optional: byte size for build-time client preview (default: 8192)
     }),
   ],
 });
 ```
+
+`mxImgAstroIntegration` embeds an initial portion of the Fourier stream directly into the generated HTML. Clients render a progressive low-frequency preview instantly on initial paint without waiting for the WebSocket connection or server roundtrips, seamlessly resuming the stream from that byte offset.
 
 ### 2. Start the Stream Server (`server.ts`)
 

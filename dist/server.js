@@ -794,9 +794,11 @@ async function saveManifest(mxImgDir, manifest) {
 
 // src/build/builder.ts
 var SUPPORTED_IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp"]);
+var DEFAULT_PREVIEW_BYTES = 8 * 1024;
 async function buildSingleMxImgAsset(imagePath, outDir, manifest, options = {}) {
   const rootDir = options.rootDir ?? process.cwd();
   const umbralRadioCroma = options.umbralRadioCroma ?? 0.15;
+  const previewBytes = options.previewBytes ?? DEFAULT_PREVIEW_BYTES;
   const absPath = resolve(rootDir, imagePath);
   const rawSourceBytes = new Uint8Array(await readFile2(absPath));
   const hash = computeMxImgHash(rawSourceBytes, umbralRadioCroma);
@@ -806,9 +808,12 @@ async function buildSingleMxImgAsset(imagePath, outDir, manifest, options = {}) 
   const baseName = basename2(absPath);
   await mkdir2(outDir, { recursive: true });
   let entry;
+  let binaryBytes;
   if (!options.force && existsSync2(outBinPath)) {
-    const existingBytes = new Uint8Array(await readFile2(outBinPath));
-    const header = parseMxImgHeader(existingBytes);
+    binaryBytes = new Uint8Array(await readFile2(outBinPath));
+    const header = parseMxImgHeader(binaryBytes);
+    const chunkLen = Math.min(previewBytes, binaryBytes.byteLength);
+    const initialChunkBase64 = Buffer.from(binaryBytes.subarray(0, chunkLen)).toString("base64");
     entry = {
       hash,
       fileName,
@@ -816,15 +821,19 @@ async function buildSingleMxImgAsset(imagePath, outDir, manifest, options = {}) 
       baseName,
       width: header.width,
       height: header.height,
-      totalBytes: existingBytes.byteLength,
+      totalBytes: binaryBytes.byteLength,
       numCoefficients: header.numCoefficients,
       kCroma: header.kCroma,
-      umbralRadioCroma: header.umbralRadioCroma
+      umbralRadioCroma: header.umbralRadioCroma,
+      initialChunkBase64,
+      initialChunkBytes: chunkLen
     };
   } else {
     const { encoded } = await encodeImageFromFile(absPath, umbralRadioCroma);
-    const binary = serializeFourierStream(encoded);
-    await writeFile2(outBinPath, binary);
+    binaryBytes = serializeFourierStream(encoded);
+    await writeFile2(outBinPath, binaryBytes);
+    const chunkLen = Math.min(previewBytes, binaryBytes.byteLength);
+    const initialChunkBase64 = Buffer.from(binaryBytes.subarray(0, chunkLen)).toString("base64");
     entry = {
       hash,
       fileName,
@@ -832,10 +841,12 @@ async function buildSingleMxImgAsset(imagePath, outDir, manifest, options = {}) 
       baseName,
       width: encoded.dims[1],
       height: encoded.dims[0],
-      totalBytes: binary.byteLength,
+      totalBytes: binaryBytes.byteLength,
       numCoefficients: encoded.numCoefficients,
       kCroma: encoded.kCroma,
-      umbralRadioCroma: encoded.umbralRadioCroma
+      umbralRadioCroma: encoded.umbralRadioCroma,
+      initialChunkBase64,
+      initialChunkBytes: chunkLen
     };
   }
   registerManifestEntry(manifest, entry, options.aliases ?? []);

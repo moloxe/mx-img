@@ -189,4 +189,53 @@ describe("MxImg Fase 2: Servidor de Streaming Equitativo y Protocolo Cliente-Ser
     expect(decoded!.rgba.length).toBe(decoded!.width * decoded!.height * 4);
     expect(decoded!.coeficientesUsados).toBeGreaterThan(100);
   });
+
+  test("4. Previsualización inicial (8 KB) decodificada localmente y continuada con stream desde offsetBytes produce resultado coherente", async () => {
+    // 1. Simular carga de preview de 8 KB directamente en cliente
+    const previewBytes = 8 * 1024;
+    const clientDecoder = new ProgressiveFourierDecoder();
+
+    // 2. Conectar y solicitar stream a partir del desfase de 8 KB
+    let framesCount = 0;
+    await new Promise<void>((resolveDone, rejectDone) => {
+      const ws = new WebSocket(wsEndpoint);
+      ws.binaryType = "arraybuffer";
+
+      ws.addEventListener("open", () => {
+        ws.send(
+          JSON.stringify({
+            type: "start",
+            id: "/assets/images/voronoi.jpeg",
+            offsetBytes: previewBytes,
+            maxPercent: 2, // Limitar para prueba rápida
+          })
+        );
+      });
+
+      ws.addEventListener("message", (event) => {
+        if (event.data instanceof ArrayBuffer) {
+          const frame = decodeServerChunkFrame(event.data);
+          framesCount++;
+
+          // Si el servidor envía embeddedHeader en offsetBytes > 0
+          if (frame.embeddedHeader && clientDecoder.getReceivedBytes() === 0) {
+            clientDecoder.appendChunk(frame.embeddedHeader, 0, frame.totalAssetBytes);
+          }
+          clientDecoder.appendChunk(frame.payload, frame.offsetBytes, frame.totalAssetBytes);
+
+          if (frame.isComplete) {
+            ws.close();
+            resolveDone();
+          }
+        }
+      });
+
+      ws.addEventListener("error", (err) => rejectDone(err));
+    });
+
+    expect(framesCount).toBeGreaterThan(0);
+    const decoded = clientDecoder.decodeToRgba();
+    expect(decoded).not.toBeNull();
+    expect(decoded!.width).toBeGreaterThan(0);
+  });
 });

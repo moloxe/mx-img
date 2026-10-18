@@ -36,10 +36,17 @@ declare class StreamConnectionManager {
     private isConnecting;
     private pendingCommands;
     private subscribers;
+    private previews;
     private intersectionObserver;
     private mutationObserver;
     private reconnectTimer;
     configure(options?: MxImgInitOptions): void;
+    loadPreviews(): void;
+    getPreview(idOrSrc: string): {
+        b64: string;
+        bytes: number;
+        total: number;
+    } | undefined;
     getConfig(): (Required<Pick<MxImgInitOptions, "streamUrl">> & MxImgInitOptions) | null;
     isConnected(): boolean;
     ensureConnected(forceReconnect?: boolean): void;
@@ -95,7 +102,8 @@ export declare class MxImg extends BaseCanvasClass {
     attributeChangedCallback(name: string, oldValue: string | null, newValue: string | null): void;
     attachToManager(): void;
     private syncStreamAttributes;
-    private resetStreamState;
+    private getDirectInitialPortion;
+    resetStreamState(): void;
     /**
      * Manejador invocado por el `IntersectionObserver` cuando cambia la visibilidad del canvas.
      */

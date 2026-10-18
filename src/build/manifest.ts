@@ -25,6 +25,10 @@ export interface MxImgManifestEntry {
   kCroma: number;
   /** Umbral de radio cromático empleado */
   umbralRadioCroma: number;
+  /** Porción inicial en base64 para previsualización inmediata en el cliente */
+  initialChunkBase64?: string;
+  /** Cantidad de bytes contenidos en la porción inicial */
+  initialChunkBytes?: number;
 }
 
 /** Estructura del archivo `/dist/.mx-img/manifest.json` */

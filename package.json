@@ -1,6 +1,6 @@
 {
   "name": "mx-img",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Progressive Fourier spectrum image encoder, decoder, and streaming custom element (<mx-img />)",
   "license": "MIT",
   "type": "module",

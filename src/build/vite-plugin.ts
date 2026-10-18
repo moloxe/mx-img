@@ -1,7 +1,12 @@
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { attachMxImgUpgradeHandler } from "../server/stream-server.ts";
-import { buildMxImgAssets, buildSingleMxImgAsset, transformHtmlForMxImg } from "./builder.ts";
+import {
+  buildMxImgAssets,
+  buildSingleMxImgAsset,
+  injectMxImgPreviews,
+  transformHtmlForMxImg,
+} from "./builder.ts";
 import {
   createEmptyManifest,
   type MxImgManifest,
@@ -16,6 +21,8 @@ export interface MxImgVitePluginOptions {
   mxImgSubDir?: string;
   /** Umbral de radio cromático (por defecto `0.15`) */
   umbralRadioCroma?: number;
+  /** Tamaño de porción inicial para previsualizaciones en bytes (por defecto 8 KB = 8192) */
+  previewBytes?: number;
   /** Etiqueta de salida tras el build (`"canvas"` con `is="mx-img"` o `"mx-img"`) */
   outputTag?: "canvas" | "mx-img";
 }
@@ -120,6 +127,7 @@ export function mxImgVitePlugin(options: MxImgVitePluginOptions = {}): VitePlugi
         inputDir: options.assetsDir ?? "src/assets/images",
         outDir,
         umbralRadioCroma,
+        previewBytes: options.previewBytes,
       });
       manifest = built.manifest;
     },
@@ -130,7 +138,8 @@ export function mxImgVitePlugin(options: MxImgVitePluginOptions = {}): VitePlugi
       const { html: transformed } = transformHtmlForMxImg(html, manifest, {
         outputTag: options.outputTag ?? "canvas",
       });
-      return transformed;
+      const { html: withPreviews } = injectMxImgPreviews(transformed, manifest);
+      return withPreviews;
     },
 
     async transform(code, id) {

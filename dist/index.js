@@ -1055,6 +1055,7 @@ class StreamConnectionManager {
   isConnecting = false;
   pendingCommands = [];
   subscribers = new Map;
+  previews = new Map;
   intersectionObserver = null;
   mutationObserver = null;
   reconnectTimer = null;
@@ -1068,6 +1069,7 @@ class StreamConnectionManager {
       ...options,
       streamUrl: resolvedStreamUrl
     };
+    this.loadPreviews();
     this.setupIntersectionObserver();
     this.setupDomUpgrader();
     this.ensureConnected(prevUrl !== undefined && prevUrl !== resolvedStreamUrl);
@@ -1079,6 +1081,60 @@ class StreamConnectionManager {
         }
       }
     }
+  }
+  loadPreviews() {
+    if (typeof document === "undefined")
+      return;
+    const scriptTags = document.querySelectorAll("script[data-mx-img-previews]");
+    for (const tag of scriptTags) {
+      try {
+        const text = tag.textContent;
+        if (!text)
+          continue;
+        const data = JSON.parse(text);
+        if (data.previews) {
+          for (const [hash, item] of Object.entries(data.previews)) {
+            this.previews.set(hash, item);
+          }
+        }
+        if (data.aliases && data.previews) {
+          for (const [alias, hash] of Object.entries(data.aliases)) {
+            const item = data.previews[hash];
+            if (item) {
+              this.previews.set(alias, item);
+            }
+          }
+        }
+      } catch (err) {
+        console.warn("[mx-img] Error leyendo data-mx-img-previews:", err);
+      }
+    }
+  }
+  getPreview(idOrSrc) {
+    if (!idOrSrc)
+      return;
+    if (this.previews.size === 0) {
+      this.loadPreviews();
+    }
+    const trimmed = idOrSrc.trim();
+    if (this.previews.has(trimmed)) {
+      return this.previews.get(trimmed);
+    }
+    const clean = trimmed.split("?")[0].split("#")[0];
+    if (this.previews.has(clean)) {
+      return this.previews.get(clean);
+    }
+    const base = clean.split("/").pop();
+    if (base && this.previews.has(base)) {
+      return this.previews.get(base);
+    }
+    if (base) {
+      const unhashed = base.replace(/^(.+)\.[a-zA-Z0-9_-]{6,16}(\.[a-zA-Z0-9]+)$/, "$1$2");
+      if (unhashed !== base && this.previews.has(unhashed)) {
+        return this.previews.get(unhashed);
+      }
+    }
+    return;
   }
   getConfig() {
     return this.config;
@@ -1316,10 +1372,26 @@ class StreamConnectionManager {
 var connectionManager = new StreamConnectionManager;
 var BaseCanvasClass = typeof HTMLCanvasElement !== "undefined" ? HTMLCanvasElement : class {
 };
+function base64ToUint8Array(b64) {
+  const binaryStr = atob(b64.trim());
+  const len = binaryStr.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0;i < len; i++) {
+    bytes[i] = binaryStr.charCodeAt(i);
+  }
+  return bytes;
+}
 
 class MxImg extends BaseCanvasClass {
   static get observedAttributes() {
-    return ["src", "data-max-percent", "max-percent", "data-offset-bytes"];
+    return [
+      "src",
+      "data-max-percent",
+      "max-percent",
+      "data-offset-bytes",
+      "data-initial-portion",
+      "data-initial-chunk"
+    ];
   }
   static sharedDecoders = new Map;
   static decodedFrameCache = new Map;
@@ -1407,6 +1479,18 @@ class MxImg extends BaseCanvasClass {
       }
     }
   }
+  getDirectInitialPortion() {
+    const raw = this.getAttribute("data-initial-portion") ?? this.getAttribute("data-initial-chunk");
+    if (!raw)
+      return;
+    const totalAttr = this.getAttribute("data-total-bytes");
+    const bytesAttr = this.getAttribute("data-offset-bytes");
+    const b64 = raw.trim();
+    const len = Math.floor(b64.length * 3 / 4);
+    const bytes = bytesAttr ? Number.parseInt(bytesAttr, 10) : len;
+    const total = totalAttr ? Number.parseInt(totalAttr, 10) : bytes;
+    return { b64, bytes, total };
+  }
   resetStreamState() {
     this.clearScheduledDecode();
     this.decoder = new ProgressiveFourierDecoder;
@@ -1443,6 +1527,55 @@ class MxImg extends BaseCanvasClass {
       MxImg.decodedFrameCache.delete(this.streamId);
       MxImg.sharedDecoders.delete(this.streamId);
     } else {
+      if (this.receivedBytes === 0) {
+        const preview = connectionManager.getPreview(this.streamId) ?? this.getDirectInitialPortion();
+        if (preview && preview.b64) {
+          try {
+            const bytes = base64ToUint8Array(preview.b64);
+            const streamKey2 = this.streamId;
+            let activeDecoder = this.decoder;
+            if (streamKey2) {
+              let shared2 = MxImg.sharedDecoders.get(streamKey2);
+              if (!shared2) {
+                shared2 = { decoder: new ProgressiveFourierDecoder, deliveredBytes: 0 };
+                MxImg.sharedDecoders.set(streamKey2, shared2);
+              }
+              if (bytes.byteLength > shared2.deliveredBytes) {
+                shared2.decoder.appendChunk(bytes, 0, preview.total);
+                shared2.deliveredBytes = bytes.byteLength;
+              }
+              activeDecoder = shared2.decoder;
+            } else {
+              this.decoder.appendChunk(bytes, 0, preview.total);
+            }
+            this.receivedBytes = bytes.byteLength;
+            this.totalAssetBytes = preview.total;
+            const maxPct = this.getMaxPercent();
+            this.targetBytes = maxPct !== undefined ? Math.floor(preview.total * (maxPct / 100)) : preview.total;
+            const header = activeDecoder.getHeader();
+            if (header) {
+              if (this.width !== header.width)
+                this.width = header.width;
+              if (this.height !== header.height)
+                this.height = header.height;
+            }
+            this.decode();
+            if (this.receivedBytes >= this.targetBytes) {
+              this.clearScheduledDecode();
+              this.updateStateAttribute("completed");
+              return;
+            }
+          } catch (err) {
+            console.warn("[mx-img] Error decodificando preview:", err);
+          }
+        }
+      }
+      const streamKey = this.streamId;
+      const shared = streamKey ? MxImg.sharedDecoders.get(streamKey) : null;
+      const actualBytes = shared ? shared.deliveredBytes : this.decoder.getReceivedBytes();
+      if (this.receivedBytes > 0 && actualBytes === 0) {
+        this.receivedBytes = 0;
+      }
       const cached = MxImg.decodedFrameCache.get(this.streamId);
       if (cached && cached.isComplete && this.getMaxPercent() === undefined) {
         this.receivedBytes = cached.receivedBytes;
@@ -1740,6 +1873,11 @@ function init(options = {}) {
 }
 if (typeof window !== "undefined") {
   registerMxImgElement();
+  if (typeof document !== "undefined") {
+    document.addEventListener("astro:page-load", () => {
+      connectionManager.loadPreviews();
+    });
+  }
 }
 // src/server/stream-server.ts
 import { createHash as createHash2, randomUUID } from "crypto";
@@ -1843,9 +1981,11 @@ async function saveManifest(mxImgDir, manifest) {
 
 // src/build/builder.ts
 var SUPPORTED_IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp"]);
+var DEFAULT_PREVIEW_BYTES = 8 * 1024;
 async function buildSingleMxImgAsset(imagePath, outDir, manifest, options = {}) {
   const rootDir = options.rootDir ?? process.cwd();
   const umbralRadioCroma = options.umbralRadioCroma ?? 0.15;
+  const previewBytes = options.previewBytes ?? DEFAULT_PREVIEW_BYTES;
   const absPath = resolve(rootDir, imagePath);
   const rawSourceBytes = new Uint8Array(await readFile2(absPath));
   const hash = computeMxImgHash(rawSourceBytes, umbralRadioCroma);
@@ -1855,9 +1995,12 @@ async function buildSingleMxImgAsset(imagePath, outDir, manifest, options = {}) 
   const baseName = basename2(absPath);
   await mkdir2(outDir, { recursive: true });
   let entry;
+  let binaryBytes;
   if (!options.force && existsSync2(outBinPath)) {
-    const existingBytes = new Uint8Array(await readFile2(outBinPath));
-    const header = parseMxImgHeader(existingBytes);
+    binaryBytes = new Uint8Array(await readFile2(outBinPath));
+    const header = parseMxImgHeader(binaryBytes);
+    const chunkLen = Math.min(previewBytes, binaryBytes.byteLength);
+    const initialChunkBase64 = Buffer.from(binaryBytes.subarray(0, chunkLen)).toString("base64");
     entry = {
       hash,
       fileName,
@@ -1865,15 +2008,19 @@ async function buildSingleMxImgAsset(imagePath, outDir, manifest, options = {}) 
       baseName,
       width: header.width,
       height: header.height,
-      totalBytes: existingBytes.byteLength,
+      totalBytes: binaryBytes.byteLength,
       numCoefficients: header.numCoefficients,
       kCroma: header.kCroma,
-      umbralRadioCroma: header.umbralRadioCroma
+      umbralRadioCroma: header.umbralRadioCroma,
+      initialChunkBase64,
+      initialChunkBytes: chunkLen
     };
   } else {
     const { encoded } = await encodeImageFromFile(absPath, umbralRadioCroma);
-    const binary2 = serializeFourierStream(encoded);
-    await writeFile2(outBinPath, binary2);
+    binaryBytes = serializeFourierStream(encoded);
+    await writeFile2(outBinPath, binaryBytes);
+    const chunkLen = Math.min(previewBytes, binaryBytes.byteLength);
+    const initialChunkBase64 = Buffer.from(binaryBytes.subarray(0, chunkLen)).toString("base64");
     entry = {
       hash,
       fileName,
@@ -1881,10 +2028,12 @@ async function buildSingleMxImgAsset(imagePath, outDir, manifest, options = {}) 
       baseName,
       width: encoded.dims[1],
       height: encoded.dims[0],
-      totalBytes: binary2.byteLength,
+      totalBytes: binaryBytes.byteLength,
       numCoefficients: encoded.numCoefficients,
       kCroma: encoded.kCroma,
-      umbralRadioCroma: encoded.umbralRadioCroma
+      umbralRadioCroma: encoded.umbralRadioCroma,
+      initialChunkBase64,
+      initialChunkBytes: chunkLen
     };
   }
   registerManifestEntry(manifest, entry, options.aliases ?? []);
@@ -1894,6 +2043,7 @@ async function buildMxImgAssets(options = {}) {
   const rootDir = resolve(options.rootDir ?? process.cwd());
   const outDir = resolve(rootDir, options.outDir ?? "dist/.mx-img");
   const umbralRadioCroma = options.umbralRadioCroma ?? 0.15;
+  const previewBytes = options.previewBytes ?? DEFAULT_PREVIEW_BYTES;
   await mkdir2(outDir, { recursive: true });
   const manifest = await loadManifest(outDir);
   let targetFiles = [];
@@ -1911,6 +2061,7 @@ async function buildMxImgAssets(options = {}) {
     const entry = await buildSingleMxImgAsset(filePath, outDir, manifest, {
       rootDir,
       umbralRadioCroma,
+      previewBytes,
       force: options.force
     });
     entries.push(entry);
@@ -1989,6 +2140,61 @@ function transformHtmlForMxImg(html, manifest, options = {}) {
     });
   }
   return { html: result, replacedCount };
+}
+function injectMxImgPreviews(html, manifest) {
+  if (html.includes("data-mx-img-previews")) {
+    return { html, injectedCount: 0 };
+  }
+  const previews = {};
+  const aliases = {};
+  const candidateRefs = new Set;
+  const tagRegex = /<(?:mx-img|canvas\b[^>]*?\bis\s*=\s*["']mx-img["'])[^>]*?\bsrc\s*=\s*["']([^"']+)["'][^>]*?>/gi;
+  for (const match of html.matchAll(tagRegex)) {
+    if (match[1])
+      candidateRefs.add(match[1]);
+  }
+  const imgPathRegex = /(?:["'/\s&;]|&quot;)([a-zA-Z0-9_\-\.\/]+?\.(?:jpe?g|png|webp))(?:\b|["'/\s&;]|&quot;)/gi;
+  for (const match of html.matchAll(imgPathRegex)) {
+    if (match[1])
+      candidateRefs.add(match[1]);
+  }
+  const hashRegex = /\b([a-f0-9]{12})\b/g;
+  for (const match of html.matchAll(hashRegex)) {
+    if (manifest.entriesByHash[match[1]]) {
+      candidateRefs.add(match[1]);
+    }
+  }
+  for (const ref of candidateRefs) {
+    const entry = resolveManifestEntry(manifest, ref);
+    if (!entry)
+      continue;
+    if (entry.initialChunkBase64 && entry.initialChunkBytes) {
+      previews[entry.hash] = {
+        b64: entry.initialChunkBase64,
+        bytes: entry.initialChunkBytes,
+        total: entry.totalBytes
+      };
+      aliases[ref] = entry.hash;
+      aliases[entry.hash] = entry.hash;
+      aliases[entry.baseName] = entry.hash;
+      if (entry.sourcePath) {
+        aliases[entry.sourcePath] = entry.hash;
+      }
+    }
+  }
+  const injectedCount = Object.keys(previews).length;
+  if (injectedCount === 0) {
+    return { html, injectedCount: 0 };
+  }
+  const payload = { previews, aliases };
+  const scriptTag = `<script type="application/json" data-mx-img-previews>${JSON.stringify(payload)}</script>`;
+  let updatedHtml = html;
+  if (/<\/body>/i.test(updatedHtml)) {
+    updatedHtml = updatedHtml.replace(/<\/body>/i, `${scriptTag}</body>`);
+  } else {
+    updatedHtml += scriptTag;
+  }
+  return { html: updatedHtml, injectedCount };
 }
 if (false) {}
 
@@ -2582,7 +2788,8 @@ function mxImgVitePlugin(options = {}) {
         rootDir,
         inputDir: options.assetsDir ?? "src/assets/images",
         outDir,
-        umbralRadioCroma
+        umbralRadioCroma,
+        previewBytes: options.previewBytes
       });
       manifest = built.manifest;
     },
@@ -2592,7 +2799,8 @@ function mxImgVitePlugin(options = {}) {
       const { html: transformed } = transformHtmlForMxImg(html, manifest, {
         outputTag: options.outputTag ?? "canvas"
       });
-      return transformed;
+      const { html: withPreviews } = injectMxImgPreviews(transformed, manifest);
+      return withPreviews;
     },
     async transform(code, id) {
       const cleanId = id.split("?")[0];
@@ -2667,7 +2875,8 @@ function mxImgAstroIntegration(options = {}) {
           rootDir,
           inputDir: options.assetsDir ?? "src/assets/images",
           outDir: primaryMxImgDir,
-          umbralRadioCroma: options.umbralRadioCroma ?? 0.15
+          umbralRadioCroma: options.umbralRadioCroma ?? 0.15,
+          previewBytes: options.previewBytes
         });
         if (existsSync5(buildOutPath)) {
           const allBuiltFiles = await readdir2(buildOutPath, { recursive: true });
@@ -2675,12 +2884,22 @@ function mxImgAstroIntegration(options = {}) {
             const relStr = String(rel);
             if (relStr.endsWith(".html")) {
               const htmlPath = join5(buildOutPath, relStr);
-              const rawHtml = await readFile4(htmlPath, "utf8");
-              if (rawHtml.includes("mx-img")) {
-                const { html: updatedHtml, replacedCount } = transformHtmlForMxImg(rawHtml, manifest, { outputTag: options.outputTag ?? "canvas" });
+              let currentHtml = await readFile4(htmlPath, "utf8");
+              let fileChanged = false;
+              if (currentHtml.includes("mx-img")) {
+                const { html: updatedHtml, replacedCount } = transformHtmlForMxImg(currentHtml, manifest, { outputTag: options.outputTag ?? "canvas" });
                 if (replacedCount > 0) {
-                  await writeFile3(htmlPath, updatedHtml, "utf8");
+                  currentHtml = updatedHtml;
+                  fileChanged = true;
                 }
+              }
+              const { html: withPreviews, injectedCount } = injectMxImgPreviews(currentHtml, manifest);
+              if (injectedCount > 0) {
+                currentHtml = withPreviews;
+                fileChanged = true;
+              }
+              if (fileChanged) {
+                await writeFile3(htmlPath, currentHtml, "utf8");
               }
             }
           }
@@ -2710,6 +2929,7 @@ __mxImgHook(${JSON.stringify({
 export {
   BYTES_PER_COEFFICIENT,
   DEFAULT_CHUNK_SIZE_BYTES,
+  DEFAULT_PREVIEW_BYTES,
   DEFAULT_STREAM_URL,
   FRAME_FLAG_COMPLETED,
   FRAME_FLAG_HAS_EMBEDDED_HEADER,
@@ -2742,6 +2962,7 @@ export {
   generateRadialOrder,
   ifftshiftAndIfft2dReal,
   init,
+  injectMxImgPreviews,
   installMxImgAutoServerHook,
   loadImageRgb,
   loadManifest,

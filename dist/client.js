@@ -659,6 +659,7 @@ class StreamConnectionManager {
   isConnecting = false;
   pendingCommands = [];
   subscribers = new Map;
+  previews = new Map;
   intersectionObserver = null;
   mutationObserver = null;
   reconnectTimer = null;
@@ -672,6 +673,7 @@ class StreamConnectionManager {
       ...options,
       streamUrl: resolvedStreamUrl
     };
+    this.loadPreviews();
     this.setupIntersectionObserver();
     this.setupDomUpgrader();
     this.ensureConnected(prevUrl !== undefined && prevUrl !== resolvedStreamUrl);
@@ -683,6 +685,60 @@ class StreamConnectionManager {
         }
       }
     }
+  }
+  loadPreviews() {
+    if (typeof document === "undefined")
+      return;
+    const scriptTags = document.querySelectorAll("script[data-mx-img-previews]");
+    for (const tag of scriptTags) {
+      try {
+        const text = tag.textContent;
+        if (!text)
+          continue;
+        const data = JSON.parse(text);
+        if (data.previews) {
+          for (const [hash, item] of Object.entries(data.previews)) {
+            this.previews.set(hash, item);
+          }
+        }
+        if (data.aliases && data.previews) {
+          for (const [alias, hash] of Object.entries(data.aliases)) {
+            const item = data.previews[hash];
+            if (item) {
+              this.previews.set(alias, item);
+            }
+          }
+        }
+      } catch (err) {
+        console.warn("[mx-img] Error leyendo data-mx-img-previews:", err);
+      }
+    }
+  }
+  getPreview(idOrSrc) {
+    if (!idOrSrc)
+      return;
+    if (this.previews.size === 0) {
+      this.loadPreviews();
+    }
+    const trimmed = idOrSrc.trim();
+    if (this.previews.has(trimmed)) {
+      return this.previews.get(trimmed);
+    }
+    const clean = trimmed.split("?")[0].split("#")[0];
+    if (this.previews.has(clean)) {
+      return this.previews.get(clean);
+    }
+    const base = clean.split("/").pop();
+    if (base && this.previews.has(base)) {
+      return this.previews.get(base);
+    }
+    if (base) {
+      const unhashed = base.replace(/^(.+)\.[a-zA-Z0-9_-]{6,16}(\.[a-zA-Z0-9]+)$/, "$1$2");
+      if (unhashed !== base && this.previews.has(unhashed)) {
+        return this.previews.get(unhashed);
+      }
+    }
+    return;
   }
   getConfig() {
     return this.config;
@@ -920,10 +976,26 @@ class StreamConnectionManager {
 var connectionManager = new StreamConnectionManager;
 var BaseCanvasClass = typeof HTMLCanvasElement !== "undefined" ? HTMLCanvasElement : class {
 };
+function base64ToUint8Array(b64) {
+  const binaryStr = atob(b64.trim());
+  const len = binaryStr.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0;i < len; i++) {
+    bytes[i] = binaryStr.charCodeAt(i);
+  }
+  return bytes;
+}
 
 class MxImg extends BaseCanvasClass {
   static get observedAttributes() {
-    return ["src", "data-max-percent", "max-percent", "data-offset-bytes"];
+    return [
+      "src",
+      "data-max-percent",
+      "max-percent",
+      "data-offset-bytes",
+      "data-initial-portion",
+      "data-initial-chunk"
+    ];
   }
   static sharedDecoders = new Map;
   static decodedFrameCache = new Map;
@@ -1011,6 +1083,18 @@ class MxImg extends BaseCanvasClass {
       }
     }
   }
+  getDirectInitialPortion() {
+    const raw = this.getAttribute("data-initial-portion") ?? this.getAttribute("data-initial-chunk");
+    if (!raw)
+      return;
+    const totalAttr = this.getAttribute("data-total-bytes");
+    const bytesAttr = this.getAttribute("data-offset-bytes");
+    const b64 = raw.trim();
+    const len = Math.floor(b64.length * 3 / 4);
+    const bytes = bytesAttr ? Number.parseInt(bytesAttr, 10) : len;
+    const total = totalAttr ? Number.parseInt(totalAttr, 10) : bytes;
+    return { b64, bytes, total };
+  }
   resetStreamState() {
     this.clearScheduledDecode();
     this.decoder = new ProgressiveFourierDecoder;
@@ -1047,6 +1131,55 @@ class MxImg extends BaseCanvasClass {
       MxImg.decodedFrameCache.delete(this.streamId);
       MxImg.sharedDecoders.delete(this.streamId);
     } else {
+      if (this.receivedBytes === 0) {
+        const preview = connectionManager.getPreview(this.streamId) ?? this.getDirectInitialPortion();
+        if (preview && preview.b64) {
+          try {
+            const bytes = base64ToUint8Array(preview.b64);
+            const streamKey2 = this.streamId;
+            let activeDecoder = this.decoder;
+            if (streamKey2) {
+              let shared2 = MxImg.sharedDecoders.get(streamKey2);
+              if (!shared2) {
+                shared2 = { decoder: new ProgressiveFourierDecoder, deliveredBytes: 0 };
+                MxImg.sharedDecoders.set(streamKey2, shared2);
+              }
+              if (bytes.byteLength > shared2.deliveredBytes) {
+                shared2.decoder.appendChunk(bytes, 0, preview.total);
+                shared2.deliveredBytes = bytes.byteLength;
+              }
+              activeDecoder = shared2.decoder;
+            } else {
+              this.decoder.appendChunk(bytes, 0, preview.total);
+            }
+            this.receivedBytes = bytes.byteLength;
+            this.totalAssetBytes = preview.total;
+            const maxPct = this.getMaxPercent();
+            this.targetBytes = maxPct !== undefined ? Math.floor(preview.total * (maxPct / 100)) : preview.total;
+            const header = activeDecoder.getHeader();
+            if (header) {
+              if (this.width !== header.width)
+                this.width = header.width;
+              if (this.height !== header.height)
+                this.height = header.height;
+            }
+            this.decode();
+            if (this.receivedBytes >= this.targetBytes) {
+              this.clearScheduledDecode();
+              this.updateStateAttribute("completed");
+              return;
+            }
+          } catch (err) {
+            console.warn("[mx-img] Error decodificando preview:", err);
+          }
+        }
+      }
+      const streamKey = this.streamId;
+      const shared = streamKey ? MxImg.sharedDecoders.get(streamKey) : null;
+      const actualBytes = shared ? shared.deliveredBytes : this.decoder.getReceivedBytes();
+      if (this.receivedBytes > 0 && actualBytes === 0) {
+        this.receivedBytes = 0;
+      }
       const cached = MxImg.decodedFrameCache.get(this.streamId);
       if (cached && cached.isComplete && this.getMaxPercent() === undefined) {
         this.receivedBytes = cached.receivedBytes;
@@ -1344,6 +1477,11 @@ function init(options = {}) {
 }
 if (typeof window !== "undefined") {
   registerMxImgElement();
+  if (typeof document !== "undefined") {
+    document.addEventListener("astro:page-load", () => {
+      connectionManager.loadPreviews();
+    });
+  }
 }
 export {
   MxImg,

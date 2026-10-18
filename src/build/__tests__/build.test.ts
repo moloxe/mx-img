@@ -9,6 +9,7 @@ import {
   mxImgVitePlugin,
   resolveManifestEntry,
   transformHtmlForMxImg,
+  injectMxImgPreviews,
 } from "../index.ts";
 
 const ROOT_DIR = resolve(import.meta.dir, "../../..");
@@ -93,5 +94,51 @@ describe("MxImg Fase 2: Build (/dist/.mx-img/*), Vite Plugin y Astro Hybrid", ()
     });
 
     expect(registeredVitePlugins.length).toBe(1);
+  });
+
+  test("4. injectMxImgPreviews inyecta un único bloque de previsualizaciones de 8 KB sin duplicados y resolviendo props", async () => {
+    const manifest = await loadManifest(DIST_MXIMG_DIR);
+    const voronoiEntry = resolveManifestEntry(manifest, "voronoi.jpeg")!;
+    expect(voronoiEntry.initialChunkBase64).toBeDefined();
+    expect(voronoiEntry.initialChunkBytes).toBe(8 * 1024);
+
+    const sampleHtml = `<!doctype html>
+<html>
+<body>
+  <div class="gallery">
+    <canvas is="mx-img" src="${voronoiEntry.hash}"></canvas>
+    <canvas is="mx-img" src="../assets/images/voronoi.jpeg"></canvas>
+    <astro-island opts="{&quot;photos&quot;:[&quot;/_astro/voronoi.D8-abc.jpeg&quot;]}"></astro-island>
+  </div>
+</body>
+</html>`;
+
+    const { html, injectedCount } = injectMxImgPreviews(sampleHtml, manifest);
+    expect(injectedCount).toBe(1); // voronoi resuelto una sola vez a pesar de estar 3 veces
+    expect(html).toContain('data-mx-img-previews');
+    expect(html).toContain(voronoiEntry.hash);
+
+    // Si se vuelve a ejecutar sobre un HTML ya inyectado, no duplica
+    const reinject = injectMxImgPreviews(html, manifest);
+    expect(reinject.injectedCount).toBe(0);
+    const matchCount = (html.match(/data-mx-img-previews/g) || []).length;
+    expect(matchCount).toBe(1);
+  });
+
+  test("5. La porción inicial en base64 coincide exactamente con los primeros bytes del archivo .mximg", async () => {
+    const manifest = await loadManifest(DIST_MXIMG_DIR);
+    const entry = resolveManifestEntry(manifest, "voronoi.jpeg")!;
+    const binPath = join(DIST_MXIMG_DIR, entry.fileName);
+    const binFile = await Bun.file(binPath).arrayBuffer();
+    const binBytes = new Uint8Array(binFile);
+
+    const b64Bytes = Buffer.from(entry.initialChunkBase64!, "base64");
+    expect(b64Bytes.byteLength).toBe(entry.initialChunkBytes!);
+    expect(b64Bytes.byteLength).toBe(8 * 1024);
+
+    // Comparar byte a byte
+    for (let i = 0; i < b64Bytes.byteLength; i++) {
+      expect(b64Bytes[i]).toBe(binBytes[i]);
+    }
   });
 });

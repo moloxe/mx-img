@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { attachMxImgUpgradeHandler } from "../server/stream-server.ts";
-import { buildMxImgAssets, transformHtmlForMxImg } from "./builder.ts";
+import { buildMxImgAssets, injectMxImgPreviews, transformHtmlForMxImg } from "./builder.ts";
 import { mxImgVitePlugin, type MxImgVitePluginOptions } from "./vite-plugin.ts";
 
 export interface MxImgAstroOptions extends MxImgVitePluginOptions {
@@ -93,6 +93,7 @@ export function mxImgAstroIntegration(options: MxImgAstroOptions = {}): AstroInt
           inputDir: options.assetsDir ?? "src/assets/images",
           outDir: primaryMxImgDir,
           umbralRadioCroma: options.umbralRadioCroma ?? 0.15,
+          previewBytes: options.previewBytes,
         });
 
         if (existsSync(buildOutPath)) {
@@ -101,16 +102,32 @@ export function mxImgAstroIntegration(options: MxImgAstroOptions = {}): AstroInt
             const relStr = String(rel);
             if (relStr.endsWith(".html")) {
               const htmlPath = join(buildOutPath, relStr);
-              const rawHtml = await readFile(htmlPath, "utf8");
-              if (rawHtml.includes("mx-img")) {
+              let currentHtml = await readFile(htmlPath, "utf8");
+              let fileChanged = false;
+
+              if (currentHtml.includes("mx-img")) {
                 const { html: updatedHtml, replacedCount } = transformHtmlForMxImg(
-                  rawHtml,
+                  currentHtml,
                   manifest,
                   { outputTag: options.outputTag ?? "canvas" }
                 );
                 if (replacedCount > 0) {
-                  await writeFile(htmlPath, updatedHtml, "utf8");
+                  currentHtml = updatedHtml;
+                  fileChanged = true;
                 }
+              }
+
+              const { html: withPreviews, injectedCount } = injectMxImgPreviews(
+                currentHtml,
+                manifest
+              );
+              if (injectedCount > 0) {
+                currentHtml = withPreviews;
+                fileChanged = true;
+              }
+
+              if (fileChanged) {
+                await writeFile(htmlPath, currentHtml, "utf8");
               }
             }
           }

@@ -15,6 +15,9 @@ import {
 
 const SUPPORTED_IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp"]);
 
+/** Tamaño por defecto de la porción inicial embebida para previsualizaciones: 8 KB (8,192 bytes) */
+export const DEFAULT_PREVIEW_BYTES = 8 * 1024;
+
 export interface BuildMxImgOptions {
   /** Directorio raíz del proyecto (por defecto `process.cwd()`) */
   rootDir?: string;
@@ -26,6 +29,8 @@ export interface BuildMxImgOptions {
   outDir?: string;
   /** Umbral de radio cromático (por defecto `0.15`) */
   umbralRadioCroma?: number;
+  /** Tamaño en bytes de la porción inicial de previsualización (por defecto 8 KB) */
+  previewBytes?: number;
   /** Si es `true`, recodifica aunque el archivo `<hash>.mximg` ya exista en disco */
   force?: boolean;
 }
@@ -38,10 +43,17 @@ export async function buildSingleMxImgAsset(
   imagePath: string,
   outDir: string,
   manifest: MxImgManifest,
-  options: { rootDir?: string; umbralRadioCroma?: number; force?: boolean; aliases?: string[] } = {}
+  options: {
+    rootDir?: string;
+    umbralRadioCroma?: number;
+    force?: boolean;
+    aliases?: string[];
+    previewBytes?: number;
+  } = {}
 ): Promise<MxImgManifestEntry> {
   const rootDir = options.rootDir ?? process.cwd();
   const umbralRadioCroma = options.umbralRadioCroma ?? 0.15;
+  const previewBytes = options.previewBytes ?? DEFAULT_PREVIEW_BYTES;
   const absPath = resolve(rootDir, imagePath);
   const rawSourceBytes = new Uint8Array(await readFile(absPath));
   const hash = computeMxImgHash(rawSourceBytes, umbralRadioCroma);
@@ -53,10 +65,14 @@ export async function buildSingleMxImgAsset(
   await mkdir(outDir, { recursive: true });
 
   let entry: MxImgManifestEntry;
+  let binaryBytes: Uint8Array;
 
   if (!options.force && existsSync(outBinPath)) {
-    const existingBytes = new Uint8Array(await readFile(outBinPath));
-    const header = parseMxImgHeader(existingBytes);
+    binaryBytes = new Uint8Array(await readFile(outBinPath));
+    const header = parseMxImgHeader(binaryBytes);
+    const chunkLen = Math.min(previewBytes, binaryBytes.byteLength);
+    const initialChunkBase64 = Buffer.from(binaryBytes.subarray(0, chunkLen)).toString("base64");
+
     entry = {
       hash,
       fileName,
@@ -64,15 +80,20 @@ export async function buildSingleMxImgAsset(
       baseName,
       width: header.width,
       height: header.height,
-      totalBytes: existingBytes.byteLength,
+      totalBytes: binaryBytes.byteLength,
       numCoefficients: header.numCoefficients,
       kCroma: header.kCroma,
       umbralRadioCroma: header.umbralRadioCroma,
+      initialChunkBase64,
+      initialChunkBytes: chunkLen,
     };
   } else {
     const { encoded } = await encodeImageFromFile(absPath, umbralRadioCroma);
-    const binary = serializeFourierStream(encoded);
-    await writeFile(outBinPath, binary);
+    binaryBytes = serializeFourierStream(encoded);
+    await writeFile(outBinPath, binaryBytes);
+
+    const chunkLen = Math.min(previewBytes, binaryBytes.byteLength);
+    const initialChunkBase64 = Buffer.from(binaryBytes.subarray(0, chunkLen)).toString("base64");
 
     entry = {
       hash,
@@ -81,10 +102,12 @@ export async function buildSingleMxImgAsset(
       baseName,
       width: encoded.dims[1],
       height: encoded.dims[0],
-      totalBytes: binary.byteLength,
+      totalBytes: binaryBytes.byteLength,
       numCoefficients: encoded.numCoefficients,
       kCroma: encoded.kCroma,
       umbralRadioCroma: encoded.umbralRadioCroma,
+      initialChunkBase64,
+      initialChunkBytes: chunkLen,
     };
   }
 
@@ -105,6 +128,7 @@ export async function buildMxImgAssets(options: BuildMxImgOptions = {}): Promise
   const rootDir = resolve(options.rootDir ?? process.cwd());
   const outDir = resolve(rootDir, options.outDir ?? "dist/.mx-img");
   const umbralRadioCroma = options.umbralRadioCroma ?? 0.15;
+  const previewBytes = options.previewBytes ?? DEFAULT_PREVIEW_BYTES;
 
   await mkdir(outDir, { recursive: true });
   const manifest = await loadManifest(outDir);
@@ -129,6 +153,7 @@ export async function buildMxImgAssets(options: BuildMxImgOptions = {}): Promise
     const entry = await buildSingleMxImgAsset(filePath, outDir, manifest, {
       rootDir,
       umbralRadioCroma,
+      previewBytes,
       force: options.force,
     });
     entries.push(entry);
@@ -234,6 +259,95 @@ export function transformHtmlForMxImg(
   }
 
   return { html: result, replacedCount };
+}
+
+export interface MxImgPreviewItem {
+  b64: string;
+  bytes: number;
+  total: number;
+}
+
+export interface MxImgPreviewsPayload {
+  previews: Record<string, MxImgPreviewItem>;
+  aliases: Record<string, string>;
+}
+
+/**
+ * Inyecta un bloque `<script type="application/json" data-mx-img-previews>` antes de `</body>`
+ * con el mapa consolidado de porciones iniciales (en base64) de todas las imágenes referenciadas
+ * en el documento HTML (tags `<mx-img>`, `<canvas is="mx-img">` y props de islas hidratadas).
+ */
+export function injectMxImgPreviews(
+  html: string,
+  manifest: MxImgManifest
+): { html: string; injectedCount: number } {
+  if (html.includes("data-mx-img-previews")) {
+    return { html, injectedCount: 0 };
+  }
+
+  const previews: Record<string, MxImgPreviewItem> = {};
+  const aliases: Record<string, string> = {};
+  const candidateRefs = new Set<string>();
+
+  // 1. Extraer fuentes desde etiquetas mx-img y canvas is="mx-img"
+  const tagRegex =
+    /<(?:mx-img|canvas\b[^>]*?\bis\s*=\s*["']mx-img["'])[^>]*?\bsrc\s*=\s*["']([^"']+)["'][^>]*?>/gi;
+  for (const match of html.matchAll(tagRegex)) {
+    if (match[1]) candidateRefs.add(match[1]);
+  }
+
+  // 2. Extraer rutas de imágenes presentes en el HTML (incluye props JSON de astro-island)
+  const imgPathRegex =
+    /(?:["'/\s&;]|&quot;)([a-zA-Z0-9_\-\.\/]+?\.(?:jpe?g|png|webp))(?:\b|["'/\s&;]|&quot;)/gi;
+  for (const match of html.matchAll(imgPathRegex)) {
+    if (match[1]) candidateRefs.add(match[1]);
+  }
+
+  // 3. Extraer posibles hashes de 12 caracteres hexadecimales
+  const hashRegex = /\b([a-f0-9]{12})\b/g;
+  for (const match of html.matchAll(hashRegex)) {
+    if (manifest.entriesByHash[match[1]]) {
+      candidateRefs.add(match[1]);
+    }
+  }
+
+  for (const ref of candidateRefs) {
+    const entry = resolveManifestEntry(manifest, ref);
+    if (!entry) continue;
+
+    if (entry.initialChunkBase64 && entry.initialChunkBytes) {
+      previews[entry.hash] = {
+        b64: entry.initialChunkBase64,
+        bytes: entry.initialChunkBytes,
+        total: entry.totalBytes,
+      };
+      aliases[ref] = entry.hash;
+      aliases[entry.hash] = entry.hash;
+      aliases[entry.baseName] = entry.hash;
+      if (entry.sourcePath) {
+        aliases[entry.sourcePath] = entry.hash;
+      }
+    }
+  }
+
+  const injectedCount = Object.keys(previews).length;
+  if (injectedCount === 0) {
+    return { html, injectedCount: 0 };
+  }
+
+  const payload: MxImgPreviewsPayload = { previews, aliases };
+  const scriptTag = `<script type="application/json" data-mx-img-previews>${JSON.stringify(
+    payload
+  )}</script>`;
+
+  let updatedHtml = html;
+  if (/<\/body>/i.test(updatedHtml)) {
+    updatedHtml = updatedHtml.replace(/<\/body>/i, `${scriptTag}</body>`);
+  } else {
+    updatedHtml += scriptTag;
+  }
+
+  return { html: updatedHtml, injectedCount };
 }
 
 // CLI: `bun run src/build/builder.ts [inputDir] [outDir]`
